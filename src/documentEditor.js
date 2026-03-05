@@ -5,32 +5,23 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const AdmZip = require('adm-zip');
 
 /**
  * Read content from a DOCX file
  */
 async function readDocxContent(buffer) {
-  const tempDir = `/tmp/docread_${Date.now()}`;
-  const docxPath = `${tempDir}/input.docx`;
-
   try {
-    fs.mkdirSync(tempDir, { recursive: true });
-    fs.writeFileSync(docxPath, buffer);
-    execSync(`unzip -q "${docxPath}" -d "${tempDir}/unpacked"`);
-
-    const docXmlPath = `${tempDir}/unpacked/word/document.xml`;
-    const docXml = fs.readFileSync(docXmlPath, 'utf8');
+    const zip = new AdmZip(buffer);
+    const docXml = zip.readAsText('word/document.xml');
     const plainText = extractTextFromXml(docXml);
 
     return {
       xml: docXml,
       text: plainText,
-      tempDir,
-      unpackedDir: `${tempDir}/unpacked`
+      zip
     };
   } catch (error) {
-    try { execSync(`rm -rf "${tempDir}"`); } catch (e) {}
     throw error;
   }
 }
@@ -115,7 +106,6 @@ Return ONLY valid JSON, nothing else.`
     const edits = JSON.parse(match ? match[0] : jsonStr);
 
     if (!edits.changes || edits.changes.length === 0) {
-      try { execSync(`rm -rf "${docContent.tempDir}"`); } catch (e) {}
       return {
         success: false,
         message: edits.summary || 'Could not determine what changes to make.',
@@ -124,8 +114,7 @@ Return ONLY valid JSON, nothing else.`
     }
 
     // Step 2: Read and modify the document XML
-    const docXmlPath = `${docContent.unpackedDir}/word/document.xml`;
-    let docXml = fs.readFileSync(docXmlPath, 'utf8');
+    let docXml = docContent.xml;
     let changesMade = 0;
 
     for (const change of edits.changes) {
@@ -230,19 +219,9 @@ Return ONLY valid JSON, nothing else.`
       }
     }
 
-    // Save modified document
-    fs.writeFileSync(docXmlPath, docXml);
-
-    // Repack the docx
-    const outputPath = `${docContent.tempDir}/output.docx`;
-    const currentDir = process.cwd();
-    process.chdir(docContent.unpackedDir);
-    execSync(`zip -q -r "${outputPath}" .`);
-    process.chdir(currentDir);
-
-    const outputBuffer = fs.readFileSync(outputPath);
-
-    try { execSync(`rm -rf "${docContent.tempDir}"`); } catch (e) {}
+    // Save modified document back to zip
+    docContent.zip.updateFile('word/document.xml', Buffer.from(docXml, 'utf8'));
+    const outputBuffer = docContent.zip.toBuffer();
 
     return {
       success: changesMade > 0,
@@ -253,7 +232,6 @@ Return ONLY valid JSON, nothing else.`
 
   } catch (error) {
     console.error('[DocEdit] Error:', error);
-    try { execSync(`rm -rf "${docContent.tempDir}"`); } catch (e) {}
     throw error;
   }
 }

@@ -19,6 +19,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "@anthropic-ai/sdk": "^0.32.0",
     "@slack/bolt": "^3.22.0",
     "@slack/web-api": "^6.12.0",

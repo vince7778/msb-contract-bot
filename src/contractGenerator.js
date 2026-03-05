@@ -15,7 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const AdmZip = require('adm-zip');
 const { COMPANIES } = require('./companyConfig');
 
 const TEMPLATES_DIR = path.join(__dirname, '..', 'templates');
@@ -53,21 +53,12 @@ async function generateContract(clientData) {
     throw new Error(`Template not found: ${templatePath}`);
   }
 
-  // Create temp directory for unpacking
-  const tempDir = `/tmp/contract_${Date.now()}`;
-  const unpackedDir = `${tempDir}/unpacked`;
-  const outputPath = `${tempDir}/output.docx`;
-
   try {
-    // Create temp directory
-    fs.mkdirSync(tempDir, { recursive: true });
+    // Read template as zip
+    const zip = new AdmZip(templatePath);
 
-    // Unpack the template
-    execSync(`unzip -q "${templatePath}" -d "${unpackedDir}"`);
-
-    // Read document.xml
-    const docXmlPath = `${unpackedDir}/word/document.xml`;
-    let docXml = fs.readFileSync(docXmlPath, 'utf8');
+    // Read document.xml from the zip
+    let docXml = zip.readAsText('word/document.xml');
 
     // Prepare replacement values
     const today = clientData.contractDate || new Date().toLocaleDateString('en-US', {
@@ -133,17 +124,11 @@ async function generateContract(clientData) {
       docXml = insertLegalRateParagraph(docXml, legalRate);
     }
 
-    // Save modified document.xml
-    fs.writeFileSync(docXmlPath, docXml);
+    // Update document.xml in the zip
+    zip.updateFile('word/document.xml', Buffer.from(docXml, 'utf8'));
 
-    // Repack the docx
-    const currentDir = process.cwd();
-    process.chdir(unpackedDir);
-    execSync(`zip -q -r "${outputPath}" .`);
-    process.chdir(currentDir);
-
-    // Read the output file
-    const buffer = fs.readFileSync(outputPath);
+    // Get the buffer
+    const buffer = zip.toBuffer();
 
     // Determine contract type for response
     let contractType;
@@ -161,13 +146,8 @@ async function generateContract(clientData) {
       legalRate: hasLegalRate ? legalRate : null
     };
 
-  } finally {
-    // Cleanup temp directory
-    try {
-      execSync(`rm -rf "${tempDir}"`);
-    } catch (e) {
-      // Ignore cleanup errors
-    }
+  } catch (err) {
+    throw err;
   }
 }
 
