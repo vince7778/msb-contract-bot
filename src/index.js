@@ -15,15 +15,56 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-// Initialize Slack app
-const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: true,
-  appToken: process.env.SLACK_APP_TOKEN
+// ---------------------------------------------------------------------------
+// Process-level safety net — prevent any unhandled socket error from killing
+// the process before our reconnection logic has a chance to run.
+// ---------------------------------------------------------------------------
+process.on('uncaughtException', (err) => {
+  console.error('[Process] Uncaught exception (process kept alive):', err.message);
 });
 
-// Initialize Claude
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process] Unhandled promise rejection (process kept alive):', reason);
+});
+
+// ---------------------------------------------------------------------------
+// Reconnection state
+// ---------------------------------------------------------------------------
+const RECONNECT_BASE_DELAY_MS = 5_000;   // 5 s initial delay
+const RECONNECT_MAX_DELAY_MS  = 300_000; // 5 min ceiling
+let reconnectAttempts = 0;
+let currentApp = null;
+
+function getReconnectDelay() {
+  // Exponential backoff: 5s, 10s, 20s, 40s … capped at 5 min
+  const delay = Math.min(
+    RECONNECT_BASE_DELAY_MS * Math.pow(2, reconnectAttempts),
+    RECONNECT_MAX_DELAY_MS
+  );
+  return delay;
+}
+
+// ---------------------------------------------------------------------------
+// App factory — builds and registers a fresh Bolt App instance
+// ---------------------------------------------------------------------------
+function createApp() {
+  const instance = new App({
+    token: process.env.SLACK_BOT_TOKEN,
+    signingSecret: process.env.SLACK_SIGNING_SECRET,
+    socketMode: true,
+    appToken: process.env.SLACK_APP_TOKEN,
+    // Surface SocketModeClient errors through the Bolt logger rather than
+    // throwing, giving our disconnect handler a chance to reconnect cleanly.
+    clientOptions: {
+      retryConfig: { retries: 0 } // we handle retries ourselves
+    }
+  });
+
+  registerHandlers(instance);
+  return instance;
+}
+
+// Initialize Claude (shared across reconnects — stateless)
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
 });
@@ -230,6 +271,11 @@ async function generateDocuments(clientData, event, client, say) {
   return clientData;
 }
 
+// ---------------------------------------------------------------------------
+// registerHandlers — attach all Slack event listeners to a Bolt App instance
+// ---------------------------------------------------------------------------
+function registerHandlers(app) {
+
 // Listen for mentions
 app.event('app_mention', async ({ event, client, say }) => {
   try {
@@ -432,15 +478,92 @@ app.message(async ({ message, say }) => {
   }
 });
 
-// Start the app
-(async () => {
-  await app.start();
-  console.log('⚡️ Contract Bot is running!');
-  console.log('📄 Template-based contracts: ENABLED');
-  console.log('✏️  Document editing: ENABLED (upload .docx + command)');
-  console.log('🧠 Natural language mode: ENABLED');
-  console.log('💬 Thread memory: ENABLED');
-  console.log('🏢 Companies: Midwest Service Bureau, Vegas Valley Collection Service');
-  console.log('📋 Templates: 4 standard contracts (MSB/VV × Medical/NonMedical)');
-  console.log('Listening for mentions in Slack...');
-})();
+} // end registerHandlers
+
+// ---------------------------------------------------------------------------
+// attachSocketHandlers — wire error/disconnect listeners onto the underlying
+// SocketModeClient that Bolt's SocketModeReceiver creates internally.
+// ---------------------------------------------------------------------------
+function attachSocketHandlers(app) {
+  // Bolt exposes the SocketModeReceiver as app.receiver; the receiver holds
+  // the SocketModeClient at app.receiver.client.
+  const socketClient = app.receiver && app.receiver.client;
+
+  if (!socketClient) {
+    console.warn('[Socket] Could not locate SocketModeClient — skipping custom error handlers.');
+    return;
+  }
+
+  socketClient.on('error', (err) => {
+    console.error('[Socket] SocketModeClient error (non-fatal):', err.message || err);
+  });
+
+  socketClient.on('disconnect', (event) => {
+    console.warn('[Socket] Disconnected from Slack Socket Mode. Event:', event);
+    scheduleReconnect();
+  });
+
+  socketClient.on('connecting', () => {
+    console.log('[Socket] Connecting to Slack Socket Mode...');
+  });
+
+  socketClient.on('connected', () => {
+    console.log('[Socket] Connected to Slack Socket Mode.');
+    reconnectAttempts = 0; // reset backoff on successful connection
+  });
+}
+
+// ---------------------------------------------------------------------------
+// scheduleReconnect — tear down the current app and start a fresh one after
+// an exponential backoff delay.
+// ---------------------------------------------------------------------------
+function scheduleReconnect() {
+  const delay = getReconnectDelay();
+  reconnectAttempts += 1;
+  console.log(`[Reconnect] Scheduling reconnect attempt #${reconnectAttempts} in ${delay / 1000}s...`);
+
+  setTimeout(async () => {
+    console.log(`[Reconnect] Attempt #${reconnectAttempts} — starting new app instance...`);
+
+    // Gracefully stop the old instance if it is still running
+    if (currentApp) {
+      try {
+        await currentApp.stop();
+      } catch (stopErr) {
+        console.warn('[Reconnect] Error stopping previous app instance:', stopErr.message);
+      }
+      currentApp = null;
+    }
+
+    await startBot();
+  }, delay);
+}
+
+// ---------------------------------------------------------------------------
+// startBot — create a fresh App, attach socket handlers, and start it.
+// ---------------------------------------------------------------------------
+async function startBot() {
+  try {
+    const app = createApp();
+    currentApp = app;
+
+    attachSocketHandlers(app);
+
+    await app.start();
+
+    console.log('⚡️ Contract Bot is running!');
+    console.log('📄 Template-based contracts: ENABLED');
+    console.log('✏️  Document editing: ENABLED (upload .docx + command)');
+    console.log('🧠 Natural language mode: ENABLED');
+    console.log('💬 Thread memory: ENABLED');
+    console.log('🏢 Companies: Midwest Service Bureau, Vegas Valley Collection Service');
+    console.log('📋 Templates: 4 standard contracts (MSB/VV × Medical/NonMedical)');
+    console.log('Listening for mentions in Slack...');
+  } catch (err) {
+    console.error('[StartBot] Failed to start app:', err.message);
+    scheduleReconnect();
+  }
+}
+
+// Boot
+startBot();
