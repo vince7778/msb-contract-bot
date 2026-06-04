@@ -344,23 +344,56 @@ function fillCollectorSignatureDate(xml, dateStr) {
   return xml.slice(0, omarIdx) + filled;
 }
 
+// Non-breaking space (U+00A0) - used to pad hidden tag runs so the
+// visible underline extends past the field, like a normal form line.
+// Regular trailing spaces aren't reliably underlined in PDF render.
+const NBSP = '\u00A0';
+
 /**
- * Insert a hidden SignWell text tag after "Account verified as unpaid
- * as of:" so SignWell places a locked, auto-filled date-signed field
- * there. The tag text is white (invisible on the page); SignWell
- * overlays the actual date field at its location.
- * Tag option order (per SignWell docs): type:signer:required:label:
- * prefill:apiId:width:height:lockSignDate:dateFormat
+ * Build a hidden SignWell tag run. The tag text is white (invisible)
+ * but the run carries a BLACK single underline, so a normal-looking
+ * form line is drawn exactly where the field will sit. Trailing
+ * non-breaking spaces extend the line.
  */
+function makeTagRun(tag, padChars) {
+  const pad = NBSP.repeat(padChars || 0);
+  return '<w:r><w:rPr><w:color w:val="FFFFFF"/><w:sz w:val="22"/>' +
+    '<w:u w:val="single" w:color="000000"/></w:rPr>' +
+    `<w:t xml:space="preserve">${tag}${pad}</w:t></w:r>`;
+}
+
+/**
+ * Remove consecutive tab-only runs (the template's blank underline
+ * fillers) starting at position `at`.
+ */
+function removeTabRunsAt(xmlStr, at) {
+  const runRe = /^<w:r\b[^>]*>(?:(?!<\/w:r>)[\s\S])*<\/w:r>/;
+  while (true) {
+    const m = xmlStr.slice(at).match(runRe);
+    if (!m) break;
+    const runXml = m[0];
+    const hasText = runXml.includes('<w:t>') || runXml.includes('<w:t ');
+    const isTabOnly = runXml.includes('<w:tab/>') && !hasText;
+    // Also remove underlined runs whose text is only whitespace -
+    // these render as stray little line stubs on the PDF.
+    const textContent = (runXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [])
+      .map(t => t.replace(/<[^>]+>/g, '')).join('');
+    const isUnderlinedWhitespace = runXml.includes('<w:u ') &&
+      hasText && /^[\s\u00A0]*$/.test(textContent);
+    if (!isTabOnly && !isUnderlinedWhitespace) break;
+    xmlStr = xmlStr.slice(0, at) + xmlStr.slice(at + runXml.length);
+  }
+  return xmlStr;
+}
+
 function insertSignwellDateTag(xml) {
   const marker = '<w:t>Account verified as unpaid as of: </w:t></w:r>';
   const idx = xml.indexOf(marker);
-  if (idx === -1) return xml; // section not found - leave as is
+  if (idx === -1) return xml;
 
   const insertAt = idx + marker.length;
-  const tagRun =
-    '<w:r><w:rPr><w:color w:val="FFFFFF"/><w:sz w:val="22"/></w:rPr>' +
-    '<w:t xml:space="preserve">{{d:1:y: : :verified_date:100:18:y:mm/dd/yyyy}}</w:t></w:r>';
+  xml = removeTabRunsAt(xml, insertAt);
+  const tagRun = makeTagRun('{{d:1:y: : :verified_date:100:18:y:mm/dd/yyyy}}', 6);
   return xml.slice(0, insertAt) + tagRun + xml.slice(insertAt);
 }
 
@@ -394,13 +427,10 @@ function insertClientFieldTags(xml) {
     baaName:      '{{af_n:1:y: : :client_baa_name:140:18}}'
   };
 
-  const makeRun = (tag) =>
-    '<w:r><w:rPr><w:color w:val="FFFFFF"/><w:sz w:val="22"/></w:rPr>' +
-    `<w:t xml:space="preserve">${tag}</w:t></w:r>`;
-
   // Insert a tag run after the first label run matching labelRegex at or
-  // after position `from`. Returns { xml, pos } - pos is -1 if not found.
-  function insertAfterLabel(xmlStr, labelRegex, tag, from) {
+  // after position `from`, removing the template's blank underline run(s)
+  // that follow the label. Returns { xml, pos } - pos is -1 if not found.
+  function placeFieldOnLine(xmlStr, labelRegex, tag, from, pad, lineBreakAfter) {
     const sub = xmlStr.slice(from);
     const m = sub.match(labelRegex);
     if (!m) return { xml: xmlStr, pos: -1 };
@@ -408,7 +438,8 @@ function insertClientFieldTags(xml) {
     const runEnd = xmlStr.indexOf('</w:r>', labelEnd);
     if (runEnd === -1) return { xml: xmlStr, pos: -1 };
     const at = runEnd + '</w:r>'.length;
-    const tagRun = makeRun(tag);
+    xmlStr = removeTabRunsAt(xmlStr, at);
+    const tagRun = makeTagRun(tag, pad) + (lineBreakAfter ? '<w:r><w:br/></w:r>' : '');
     return {
       xml: xmlStr.slice(0, at) + tagRun + xmlStr.slice(at),
       pos: at + tagRun.length
@@ -425,27 +456,27 @@ function insertClientFieldTags(xml) {
   if (omarIdx === -1) return xml; // no execution block found - leave as is
 
   // --- Execution block, client side ---
-  let r = insertAfterLabel(xml, sigRe, TAGS.signature, omarIdx);
+  let r = placeFieldOnLine(xml, sigRe, TAGS.signature, omarIdx, 14, true);
   if (r.pos === -1) return xml; // client block not found - leave untouched
   xml = r.xml;
   let pos = r.pos;
 
-  r = insertAfterLabel(xml, printRe, TAGS.printName, pos);
+  r = placeFieldOnLine(xml, printRe, TAGS.printName, pos, 12, true);
   if (r.pos !== -1) { xml = r.xml; pos = r.pos; }
 
-  r = insertAfterLabel(xml, titleRe, TAGS.title, pos);
+  r = placeFieldOnLine(xml, titleRe, TAGS.title, pos, 12);
   if (r.pos !== -1) { xml = r.xml; pos = r.pos; }
 
-  r = insertAfterLabel(xml, dateRe, TAGS.date, pos);
+  r = placeFieldOnLine(xml, dateRe, TAGS.date, pos, 8);
   if (r.pos !== -1) { xml = r.xml; pos = r.pos; }
 
   // --- BAA block (medical templates only): second "Omar" occurrence ---
   const omar2 = xml.indexOf('Omar', pos);
   if (omar2 !== -1) {
-    r = insertAfterLabel(xml, sigRe, TAGS.baaSignature, omar2);
+    r = placeFieldOnLine(xml, sigRe, TAGS.baaSignature, omar2, 14);
     if (r.pos !== -1) {
       xml = r.xml;
-      const r2 = insertAfterLabel(xml, nameRe, TAGS.baaName, r.pos);
+      const r2 = placeFieldOnLine(xml, nameRe, TAGS.baaName, r.pos, 12);
       if (r2.pos !== -1) xml = r2.xml;
     }
   }
