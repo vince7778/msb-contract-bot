@@ -9,6 +9,7 @@ const { parseNaturalLanguage, parseChangeRequest, cleanClientName } = require('.
 const { remember, recall, update, hasContext } = require('./conversationMemory');
 const { detectCompany, COMPANIES } = require('./companyConfig');
 const { editDocument, isWordDocument } = require('./documentEditor');
+const { sendForSignature } = require('./signwellIntegration');
 const axios = require('axios');
 const https = require('https');
 const http = require('http');
@@ -255,6 +256,50 @@ async function generateDocuments(clientData, event, client, say) {
       filename: onePagerFileName,
       title: `${company.shortName} One-Pager - ${clientData.clientName}`,
       initial_comment: `:page_facing_up: And here's the custom *${company.shortName}* One-Pager!`
+    });
+  }
+
+  // ============================================================
+  // SignWell e-signature auto-send
+  // If the request included a client email, upload the contract to
+  // SignWell and send it to the prospect for signature immediately.
+  // The existing Zapier flow posts the signed PDF to
+  // #sales-2-contracts once they sign - nothing else needed here.
+  // ============================================================
+  if (clientData.email) {
+    try {
+      const signResult = await sendForSignature({
+        contractBuffer: contractResult.buffer,
+        fileName: contractFileName,
+        recipientName: clientData.signerName || clientData.clientName,
+        recipientEmail: clientData.email,
+        companyConfig: company
+      });
+
+      const signingUrl = signResult.recipients && signResult.recipients[0] && signResult.recipients[0].signing_url;
+      await say({
+        thread_ts: event.thread_ts || event.ts,
+        text: `:writing_hand: *Sent for e-signature via SignWell!*\n` +
+          `• Recipient: ${clientData.signerName || clientData.clientName} (${clientData.email})\n` +
+          `• From: ${company.shortName} (${company.email})\n` +
+          `• Status: ${signResult.status}\n` +
+          (signingUrl ? `• Signing link: ${signingUrl}\n` : '') +
+          `They'll receive the signing email shortly. The signed PDF will land in <#${process.env.CONTRACT_CHANNEL_ID || 'C08HFEPLJ0K'}> automatically.`
+      });
+    } catch (signError) {
+      const apiDetail = signError.response && signError.response.data
+        ? ` (${JSON.stringify(signError.response.data).slice(0, 200)})`
+        : '';
+      console.error('[SignWell] Error:', signError.message, apiDetail);
+      await say({
+        thread_ts: event.thread_ts || event.ts,
+        text: `:warning: Contract generated, but I couldn't auto-send it via SignWell${apiDetail ? apiDetail : ''}. Please send it manually from signwell.com.`
+      });
+    }
+  } else {
+    await say({
+      thread_ts: event.thread_ts || event.ts,
+      text: `:envelope_with_arrow: No client email in the request, so I didn't auto-send for signature. Reply in this thread with "update email: contact@client.com" and I'll regenerate and send it via SignWell, or send manually.`
     });
   }
 

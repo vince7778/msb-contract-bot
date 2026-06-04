@@ -61,7 +61,10 @@ async function generateContract(clientData) {
     let docXml = zip.readAsText('word/document.xml');
 
     // Prepare replacement values
+    // Always use US Central time (America/Chicago) — Railway servers run on
+    // UTC, which would otherwise flip the date ahead in the evening hours.
     const today = clientData.contractDate || new Date().toLocaleDateString('en-US', {
+      timeZone: 'America/Chicago',
       month: '2-digit',
       day: '2-digit',
       year: 'numeric'
@@ -123,6 +126,39 @@ async function generateContract(clientData) {
     if (hasLegalRate && legalRate) {
       docXml = insertLegalRateParagraph(docXml, legalRate);
     }
+
+    // ============================================================
+    // STEP 5: Fill Omar's signing date
+    // Templates carry Omar Taha's pre-applied signature, but the
+    // "Date:" line under his signature block is blank. Fill it with
+    // the contract date so it's always current. The client's Date
+    // line (further down) is left blank for the signer.
+    // ============================================================
+    docXml = fillCollectorSignatureDate(docXml, today);
+
+    // ============================================================
+    // STEP 6: SignWell date-signed text tag
+    // Inserts a hidden (white text) SignWell text tag after
+    // "Account verified as unpaid as of:" in the PLACEMENT
+    // CERTIFICATION section. When the contract is sent via SignWell
+    // (text_tags: true), this becomes a locked date field that
+    // auto-fills with the date the client signs.
+    // Tag options: date field, signer 1, required, API ID
+    // "verified_date", 100x18px, lock-signing-date=y, mm/dd/yyyy.
+    // ============================================================
+    docXml = insertSignwellDateTag(docXml);
+
+    // ============================================================
+    // STEP 7: SignWell client signature field tags
+    // Inserts hidden text tags on every client-side line so the
+    // client signs IN the document (no generic appended page):
+    //   Execution block: Signature, Print Name (auto-filled),
+    //     Title (typed), Date (locked, auto-fills on signing)
+    //   BAA block (medical only): Signature, Name (auto-filled)
+    // Must run AFTER fillCollectorSignatureDate so Omar's filled
+    // Date line no longer matches the blank-Date pattern.
+    // ============================================================
+    docXml = insertClientFieldTags(docXml);
 
     // Update document.xml in the zip
     zip.updateFile('word/document.xml', Buffer.from(docXml, 'utf8'));
@@ -284,6 +320,137 @@ function replaceMultiRunPlaceholder(xml, parts, replacement) {
   }
 
   return result;
+}
+
+/**
+ * Fill the blank "Date:" line under Omar Taha's signature block.
+ * Anchors on the first occurrence of "Omar" in the document XML
+ * (which in all templates appears only in the AGREEMENT EXECUTION
+ * block) and fills the first <w:t>Date: </w:t> run after it.
+ * The client's Date line further down is left untouched.
+ */
+function fillCollectorSignatureDate(xml, dateStr) {
+  const omarIdx = xml.indexOf('Omar');
+  if (omarIdx === -1) return xml; // no signature block found - leave as is
+
+  const dateTagRegex = /<w:t(?:\s[^>]*)?>Date:\s*<\/w:t>/;
+  const after = xml.slice(omarIdx);
+  if (!dateTagRegex.test(after)) return xml;
+
+  const filled = after.replace(
+    dateTagRegex,
+    `<w:t xml:space="preserve">Date: ${dateStr}</w:t>`
+  );
+  return xml.slice(0, omarIdx) + filled;
+}
+
+/**
+ * Insert a hidden SignWell text tag after "Account verified as unpaid
+ * as of:" so SignWell places a locked, auto-filled date-signed field
+ * there. The tag text is white (invisible on the page); SignWell
+ * overlays the actual date field at its location.
+ * Tag option order (per SignWell docs): type:signer:required:label:
+ * prefill:apiId:width:height:lockSignDate:dateFormat
+ */
+function insertSignwellDateTag(xml) {
+  const marker = '<w:t>Account verified as unpaid as of: </w:t></w:r>';
+  const idx = xml.indexOf(marker);
+  if (idx === -1) return xml; // section not found - leave as is
+
+  const insertAt = idx + marker.length;
+  const tagRun =
+    '<w:r><w:rPr><w:color w:val="FFFFFF"/><w:sz w:val="22"/></w:rPr>' +
+    '<w:t xml:space="preserve">{{d:1:y: : :verified_date:100:18:y:mm/dd/yyyy}}</w:t></w:r>';
+  return xml.slice(0, insertAt) + tagRun + xml.slice(insertAt);
+}
+
+/**
+ * Insert hidden SignWell text tags on the client-side signature lines
+ * so the client completes the actual blocks in the document:
+ *
+ *   Execution block (all templates):
+ *     Signature:  -> signature field (required)
+ *     Print Name: -> auto-filled with the signer's name
+ *     Title:      -> text field the client types
+ *     Date:       -> locked date field, auto-fills with signing date
+ *   BAA block (medical templates only):
+ *     Signature:  -> signature field (required)
+ *     Name:       -> auto-filled with the signer's name
+ *
+ * Anchoring: Omar's labels appear before his name in the XML, so
+ * searching forward from the first "Omar" finds only client labels.
+ * Omar's own Title/Date are skipped because the search starts at the
+ * client's Signature line (which comes after Omar's Title), and
+ * Omar's Date has already been filled (no longer a blank match).
+ * Tag text is white (invisible); SignWell overlays fields there.
+ */
+function insertClientFieldTags(xml) {
+  const TAGS = {
+    signature:    '{{s:1:y: : :client_signature:160:35}}',
+    printName:    '{{af_n:1:y: : :client_print_name:140:18}}',
+    title:        '{{text:1:y:Title: :client_title:120:18}}',
+    date:         '{{d:1:y: : :client_sign_date:100:18:y:mm/dd/yyyy}}',
+    baaSignature: '{{s:1:y: : :client_baa_signature:160:35}}',
+    baaName:      '{{af_n:1:y: : :client_baa_name:140:18}}'
+  };
+
+  const makeRun = (tag) =>
+    '<w:r><w:rPr><w:color w:val="FFFFFF"/><w:sz w:val="22"/></w:rPr>' +
+    `<w:t xml:space="preserve">${tag}</w:t></w:r>`;
+
+  // Insert a tag run after the first label run matching labelRegex at or
+  // after position `from`. Returns { xml, pos } - pos is -1 if not found.
+  function insertAfterLabel(xmlStr, labelRegex, tag, from) {
+    const sub = xmlStr.slice(from);
+    const m = sub.match(labelRegex);
+    if (!m) return { xml: xmlStr, pos: -1 };
+    const labelEnd = from + m.index + m[0].length;
+    const runEnd = xmlStr.indexOf('</w:r>', labelEnd);
+    if (runEnd === -1) return { xml: xmlStr, pos: -1 };
+    const at = runEnd + '</w:r>'.length;
+    const tagRun = makeRun(tag);
+    return {
+      xml: xmlStr.slice(0, at) + tagRun + xmlStr.slice(at),
+      pos: at + tagRun.length
+    };
+  }
+
+  const sigRe   = /<w:t(?:\s[^>]*)?>Signature:\s*<\/w:t>/;
+  const printRe = /<w:t(?:\s[^>]*)?>Print Name:\s*<\/w:t>/;
+  const titleRe = /<w:t(?:\s[^>]*)?>Title:\s*<\/w:t>/;
+  const dateRe  = /<w:t(?:\s[^>]*)?>Date:\s*<\/w:t>/;
+  const nameRe  = /<w:t(?:\s[^>]*)?>Name:\s*<\/w:t>/;
+
+  const omarIdx = xml.indexOf('Omar');
+  if (omarIdx === -1) return xml; // no execution block found - leave as is
+
+  // --- Execution block, client side ---
+  let r = insertAfterLabel(xml, sigRe, TAGS.signature, omarIdx);
+  if (r.pos === -1) return xml; // client block not found - leave untouched
+  xml = r.xml;
+  let pos = r.pos;
+
+  r = insertAfterLabel(xml, printRe, TAGS.printName, pos);
+  if (r.pos !== -1) { xml = r.xml; pos = r.pos; }
+
+  r = insertAfterLabel(xml, titleRe, TAGS.title, pos);
+  if (r.pos !== -1) { xml = r.xml; pos = r.pos; }
+
+  r = insertAfterLabel(xml, dateRe, TAGS.date, pos);
+  if (r.pos !== -1) { xml = r.xml; pos = r.pos; }
+
+  // --- BAA block (medical templates only): second "Omar" occurrence ---
+  const omar2 = xml.indexOf('Omar', pos);
+  if (omar2 !== -1) {
+    r = insertAfterLabel(xml, sigRe, TAGS.baaSignature, omar2);
+    if (r.pos !== -1) {
+      xml = r.xml;
+      const r2 = insertAfterLabel(xml, nameRe, TAGS.baaName, r.pos);
+      if (r2.pos !== -1) xml = r2.xml;
+    }
+  }
+
+  return xml;
 }
 
 /**
