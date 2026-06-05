@@ -10,6 +10,7 @@ const { remember, recall, update, hasContext } = require('./conversationMemory')
 const { detectCompany, COMPANIES } = require('./companyConfig');
 const { editDocument, isWordDocument } = require('./documentEditor');
 const { sendForSignature } = require('./signwellIntegration');
+const { convertDocxToPdf } = require('./pdfConverter');
 const axios = require('axios');
 const https = require('https');
 const http = require('http');
@@ -247,12 +248,23 @@ async function generateDocuments(clientData, event, client, say) {
   });
 
   // Upload one-pager ONLY if requested
+  // Delivered as PDF (clients often can't open .docx); falls back to
+  // .docx if PDF conversion is unavailable.
   if (onePagerResult) {
-    const onePagerFileName = `${filePrefix}_OnePager_${safeClientName}_${Date.now()}.docx`;
+    let onePagerFile = onePagerResult.buffer;
+    let onePagerExt = 'docx';
+    try {
+      onePagerFile = await convertDocxToPdf(onePagerResult.buffer);
+      onePagerExt = 'pdf';
+    } catch (pdfError) {
+      console.error('[OnePager] PDF conversion failed, sending .docx:', pdfError.message);
+    }
+
+    const onePagerFileName = `${filePrefix}_OnePager_${safeClientName}_${Date.now()}.${onePagerExt}`;
     await client.files.uploadV2({
       channel_id: event.channel,
       thread_ts: event.thread_ts || event.ts,
-      file: onePagerResult.buffer,
+      file: onePagerFile,
       filename: onePagerFileName,
       title: `${company.shortName} One-Pager - ${clientData.clientName}`,
       initial_comment: `:page_facing_up: And here's the custom *${company.shortName}* One-Pager!`

@@ -352,11 +352,12 @@ function createStunningOnePager(clientData, company, content) {
   children.push(spacer(150));
 
   // ========== CONTACT FOOTER ==========
+  // Plain text labels (emoji render as empty boxes in PDF conversion)
   const contactInfo = [
-    `📞 ${company.phone}`,
-    `🌐 ${company.website}`,
-    `📍 ${company.address}`
-  ].join('  |  ');
+    `Phone: ${company.phone}`,
+    `Web: ${company.website}`,
+    `Address: ${company.address}`
+  ].join('   |   ');
 
   children.push(new Paragraph({
     alignment: AlignmentType.CENTER,
