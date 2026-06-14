@@ -11,6 +11,7 @@ const { detectCompany, COMPANIES } = require('./companyConfig');
 const { editDocument, isWordDocument } = require('./documentEditor');
 const { sendForSignature } = require('./signwellIntegration');
 const { convertDocxToPdf } = require('./pdfConverter');
+const { isContractQuestion, answerContractQuestion } = require('./contractQuery');
 const axios = require('axios');
 const https = require('https');
 const http = require('http');
@@ -390,6 +391,20 @@ app.event('app_mention', async ({ event, client, say }) => {
         thread_ts: threadTs,
         text: `Hey! I'm ContractBot - I create contracts for *Midwest Service Bureau, LLC* and *Vegas Valley Collection Service*.\n\n*Just talk to me naturally!* For example:\n• "Create a contract for ABC Dental, contact is Dr. Smith, they have $300K in aging AR"\n• "New client Premier Auto Parts, 35% rate"\n• "Vegas Valley contract for Desert Medical Center at 30% and 40% with legal"\n• "Contract for Smith Dental with one-pager"\n\n*I'll automatically:*\n• Figure out which company (MSB or Vegas Valley)\n• Detect if it's Medical or Non-Medical\n• Use the correct standard contract template\n• Generate a follow-up email\n\n*One-pager:* I only create one-pagers if you ask for it!\n• "...with a one-pager" or "also make a one-pager"\n\n*Rates:*\n• Default is 30% if not specified\n• Say "35% and 45%" for standard + legal rate\n\n*Edit existing documents:* Upload a .docx and tell me what to change!\n• "Add 15% fee for pre-collections"\n• "Change rate to 25%"\n• "Update the date to today"\n\n*Need changes?* Just reply in the thread:\n• "Change the rate to 25%"\n• "Actually it's non-medical"\n• "Add a one-pager"`
       });
+      return;
+    }
+
+    // Check if this is a QUESTION about existing contracts (lookup, not create)
+    if (isContractQuestion(text)) {
+      console.log('[Bot] Contract question detected, looking up...');
+      await say({ thread_ts: threadTs, text: ':mag: Looking that up...' });
+      try {
+        const answer = await answerContractQuestion(anthropic, client, text);
+        await say({ thread_ts: threadTs, text: answer });
+      } catch (qErr) {
+        console.error('[Query] Error:', qErr.message);
+        await say({ thread_ts: threadTs, text: ":x: I couldn't search the contract history just now. Please try again, or check SignWell directly." });
+      }
       return;
     }
 
