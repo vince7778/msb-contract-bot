@@ -18,6 +18,19 @@ const fs = require('fs');
 const path = require('path');
 
 // ---------------------------------------------------------------------------
+// Pending contracts awaiting manual review.
+// Generated contracts wait here until a team member clicks "Send for
+// signature" (or "Discard") on the Slack message. Keyed by a short id
+// placed in the button value. Module-level so it survives socket
+// reconnects within the same process (lost only on full redeploy,
+// which is acceptable — a contract can simply be regenerated).
+// ---------------------------------------------------------------------------
+const pendingContracts = new Map();
+
+// Auto-expire a pending contract after this long if nobody acts on it.
+const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// ---------------------------------------------------------------------------
 // Process-level safety net — prevent any unhandled socket error from killing
 // the process before our reconnection logic has a chance to run.
 // ---------------------------------------------------------------------------
@@ -272,46 +285,75 @@ async function generateDocuments(clientData, event, client, say) {
   }
 
   // ============================================================
-  // SignWell e-signature auto-send
-  // If the request included a client email, upload the contract to
-  // SignWell and send it to the prospect for signature immediately.
-  // The existing Zapier flow posts the signed PDF to
-  // #sales-2-contracts once they sign - nothing else needed here.
+  // Manual review before sending (Avery's request)
+  // Instead of auto-sending, post the contract with Send / Discard
+  // buttons. Nothing goes to the client until a team member clicks
+  // "Send for signature". The signed PDF still lands in
+  // #sales-2-contracts via the existing Zapier flow once signed.
   // ============================================================
   if (clientData.email) {
-    try {
-      const signResult = await sendForSignature({
-        contractBuffer: contractResult.buffer,
-        fileName: contractFileName,
-        recipientName: clientData.signerName || clientData.clientName,
-        recipientEmail: clientData.email,
-        companyConfig: company
-      });
+    const pendingId = `c_${event.channel}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    pendingContracts.set(pendingId, {
+      buffer: contractResult.buffer,
+      fileName: contractFileName,
+      recipientName: clientData.signerName || clientData.clientName,
+      recipientEmail: clientData.email,
+      company,
+      clientName: clientData.clientName,
+      createdAt: Date.now()
+    });
 
-      const signingUrl = signResult.recipients && signResult.recipients[0] && signResult.recipients[0].signing_url;
-      await say({
-        thread_ts: event.thread_ts || event.ts,
-        text: `:writing_hand: *Sent for e-signature via SignWell!*\n` +
-          `• Recipient: ${clientData.signerName || clientData.clientName} (${clientData.email})\n` +
-          `• From: ${company.shortName} (${company.email})\n` +
-          `• Status: ${signResult.status}\n` +
-          (signingUrl ? `• Signing link: ${signingUrl}\n` : '') +
-          `They'll receive the signing email shortly. The signed PDF will land in <#${process.env.CONTRACT_CHANNEL_ID || 'C08HFEPLJ0K'}> automatically.`
-      });
-    } catch (signError) {
-      const apiDetail = signError.response && signError.response.data
-        ? ` (${JSON.stringify(signError.response.data).slice(0, 200)})`
-        : '';
-      console.error('[SignWell] Error:', signError.message, apiDetail);
-      await say({
-        thread_ts: event.thread_ts || event.ts,
-        text: `:warning: Contract generated, but I couldn't auto-send it via SignWell${apiDetail ? apiDetail : ''}. Please send it manually from signwell.com.`
-      });
-    }
+    // Auto-expire if nobody acts within the TTL (don't keep the process alive)
+    const expireTimer = setTimeout(() => {
+      pendingContracts.delete(pendingId);
+    }, PENDING_TTL_MS);
+    if (expireTimer.unref) expireTimer.unref();
+
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts || event.ts,
+      text: `Contract for ${clientData.clientName} is ready for review.`,
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `:mag: *Contract ready for review* \u2014 *${clientData.clientName}*\nReview the contract above. When it looks good, click *Send for signature* and I'll email it to the client. Or *Discard* if it needs a redo.`
+          }
+        },
+        {
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: `Recipient: *${clientData.signerName || clientData.clientName}* (${clientData.email})  \u00b7  From: *${company.shortName}* (${company.email})`
+          }]
+        },
+        {
+          type: 'actions',
+          block_id: 'contract_review',
+          elements: [
+            {
+              type: 'button',
+              style: 'primary',
+              text: { type: 'plain_text', text: ':white_check_mark: Send for signature', emoji: true },
+              action_id: 'send_contract',
+              value: pendingId
+            },
+            {
+              type: 'button',
+              style: 'danger',
+              text: { type: 'plain_text', text: ':wastebasket: Discard', emoji: true },
+              action_id: 'discard_contract',
+              value: pendingId
+            }
+          ]
+        }
+      ]
+    });
   } else {
     await say({
       thread_ts: event.thread_ts || event.ts,
-      text: `:envelope_with_arrow: No client email in the request, so I didn't auto-send for signature. Reply in this thread with "update email: contact@client.com" and I'll regenerate and send it via SignWell, or send manually.`
+      text: `:envelope_with_arrow: No client email in the request, so there's nothing to send yet. Reply in this thread with "update email: contact@client.com" and I'll regenerate it with a Send button.`
     });
   }
 
@@ -533,6 +575,91 @@ app.message(async ({ message, say }) => {
   if (message.channel_type === 'im') {
     await say(`Hi! I work best in channels where I can share documents with your team.\n\nJust mention me with your client details:\n"@ContractBot create a contract for ABC Medical, contact is Dr. Smith..."`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Button: Send for signature
+// ---------------------------------------------------------------------------
+app.action('send_contract', async ({ ack, body, client, action }) => {
+  await ack();
+  const pendingId = action.value;
+  const channel = body.container && body.container.channel_id;
+  const messageTs = body.message && body.message.ts;
+  const clickedBy = body.user && body.user.id ? `<@${body.user.id}>` : 'A team member';
+
+  const pending = pendingContracts.get(pendingId);
+  if (!pending) {
+    try {
+      await client.chat.update({
+        channel, ts: messageTs,
+        text: 'This contract is no longer available to send.',
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':information_source: This contract was already handled or has expired. Generate a new one if you still need to send it.' } }]
+      });
+    } catch (e) { console.error('[Send] update failed:', e.message); }
+    return;
+  }
+
+  try {
+    const signResult = await sendForSignature({
+      contractBuffer: pending.buffer,
+      fileName: pending.fileName,
+      recipientName: pending.recipientName,
+      recipientEmail: pending.recipientEmail,
+      companyConfig: pending.company
+    });
+
+    const signingUrl = signResult.recipients && signResult.recipients[0] && signResult.recipients[0].signing_url;
+    pendingContracts.delete(pendingId);
+
+    await client.chat.update({
+      channel, ts: messageTs,
+      text: `Sent for e-signature: ${pending.clientName}`,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text:
+          `:writing_hand: *Sent for e-signature via SignWell!*  _(approved by ${clickedBy})_\n` +
+          `\u2022 Recipient: *${pending.recipientName}* (${pending.recipientEmail})\n` +
+          `\u2022 From: *${pending.company.shortName}* (${pending.company.email})\n` +
+          `\u2022 Status: ${signResult.status}` +
+          (signingUrl ? `\n\u2022 Signing link: ${signingUrl}` : '')
+        } },
+        { type: 'context', elements: [{ type: 'mrkdwn', text:
+          `The client will get the signing email shortly. The signed PDF will land in <#${process.env.CONTRACT_CHANNEL_ID || 'C08HFEPLJ0K'}> automatically.`
+        }] }
+      ]
+    });
+  } catch (signError) {
+    const apiDetail = signError.response && signError.response.data
+      ? ` (${JSON.stringify(signError.response.data).slice(0, 200)})`
+      : '';
+    console.error('[Send] SignWell error:', signError.message, apiDetail);
+    await client.chat.postMessage({
+      channel, thread_ts: messageTs,
+      text: `:warning: Couldn't send via SignWell${apiDetail}. The Send button is still active \u2014 try again, or send manually from signwell.com.`
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Button: Discard
+// ---------------------------------------------------------------------------
+app.action('discard_contract', async ({ ack, body, client, action }) => {
+  await ack();
+  const pendingId = action.value;
+  const channel = body.container && body.container.channel_id;
+  const messageTs = body.message && body.message.ts;
+  const clickedBy = body.user && body.user.id ? `<@${body.user.id}>` : 'A team member';
+
+  pendingContracts.delete(pendingId);
+
+  try {
+    await client.chat.update({
+      channel, ts: messageTs,
+      text: 'Contract discarded.',
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text:
+        `:wastebasket: *Discarded* by ${clickedBy}. Nothing was sent to the client. Reply in this thread with changes and I'll generate a new version.`
+      } }]
+    });
+  } catch (e) { console.error('[Discard] update failed:', e.message); }
 });
 
 } // end registerHandlers
