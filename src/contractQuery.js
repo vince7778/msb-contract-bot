@@ -66,6 +66,54 @@ async function fetchChannelDigest(client, channelId, label, limit = 80) {
  * Answer a contract question using Slack history.
  * @returns {Promise<string>} the answer text to post back
  */
+function statusEmoji(status) {
+  const t = (status || '').toLowerCase();
+  if (t.includes('sign') && !t.includes('not') && !t.includes('await') && !t.includes('unsigned')) return ':white_check_mark:';
+  if (t.includes('await') || t.includes('sent') || t.includes('pending') || t.includes('not yet')) return ':hourglass_flowing_sand:';
+  if (t.includes('view')) return ':eyes:';
+  if (t.includes('discard')) return ':wastebasket:';
+  return ':grey_question:';
+}
+
+/**
+ * Build a clean Slack Block Kit card from the structured answer.
+ * Returns { text, blocks } - text is the plain fallback.
+ */
+function buildAnswerBlocks(data, question) {
+  if (!data || !data.found) {
+    const msg = (data && data.note) ||
+      `I couldn't find a contract matching that in the recent history. Try checking SignWell directly.`;
+    return {
+      text: msg,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `:mag: ${msg}` } }]
+    };
+  }
+
+  const client = data.client || 'Contract';
+  const company = data.company || null;
+  const headerBits = [`:page_facing_up: *${client}*`];
+  if (company) headerBits.push(company);
+  const header = headerBits.join('  ·  ');
+  const statusLine = `${statusEmoji(data.status)} *${data.status || 'Status unknown'}*`;
+
+  const fields = [];
+  if (data.rate) fields.push({ type: 'mrkdwn', text: `*Rate*\n${data.rate}` });
+  if (company) fields.push({ type: 'mrkdwn', text: `*Entity*\n${company}` });
+  if (data.signer) fields.push({ type: 'mrkdwn', text: `*Signer*\n${data.signer}` });
+  if (data.date) fields.push({ type: 'mrkdwn', text: `*Date*\n${data.date}` });
+
+  const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: `${header}\n${statusLine}` } }];
+  if (fields.length) blocks.push({ type: 'section', fields: fields.slice(0, 10) });
+  if (data.note) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: data.note }] });
+
+  const text = [client, data.status, data.rate].filter(Boolean).join(' — ');
+  return { text, blocks };
+}
+
+/**
+ * Answer a contract question using Slack history.
+ * Returns { text, blocks } for a clean Slack card.
+ */
 async function answerContractQuestion(anthropic, client, question) {
   const [requests, signed] = await Promise.all([
     fetchChannelDigest(client, REQUESTS_CHANNEL, 'CONTRACT REQUESTS (#contracts-maker)'),
@@ -73,21 +121,30 @@ async function answerContractQuestion(anthropic, client, question) {
   ]);
 
   const prompt = `You are ContractBot's lookup assistant for a debt-collection company.
-Answer the team's question using ONLY the Slack history provided below. Do not invent details.
+Using ONLY the Slack history below, answer the team's question. Do not invent details.
 
 How to read the data:
-- "CONTRACT REQUESTS" messages contain labeled fields: Company (MSB or VV/Vegas Valley),
+- "CONTRACT REQUESTS" messages have labeled fields: Company (MSB or VV/Vegas Valley),
   Client, Signer, Email, Address, Website, Rate (e.g. "30%" or "30% / 40% litigation").
 - "SIGNED CONTRACTS" messages are signed PDFs (filenames include the client name) and
-  view/sign status alerts. Use these to judge whether a contract was signed.
+  view/sign status alerts. Use these to decide whether a contract was signed.
+
+Return ONLY a JSON object (no markdown, no backticks) with these keys:
+{
+  "found": true or false,
+  "client": "client/business name or null",
+  "company": "MSB" or "Vegas Valley" or null,
+  "rate": "the rate string e.g. '30% / 40% litigation', or null",
+  "signer": "signer name or null",
+  "status": "Signed" | "Sent, awaiting signature" | "Viewed, not signed" | "Not yet sent" | "Unknown",
+  "date": "a relevant date if available, or null",
+  "note": "one short sentence of extra context, or if not found, what the team should do"
+}
 
 Rules:
-- Be concise and direct. Lead with the answer.
-- If asked whether something is signed, check the SIGNED CONTRACTS section and say clearly
-  signed / not yet / can't tell, with the date if available.
-- If you can't find the contract in the history, say so plainly and suggest the team
-  check SignWell directly — do NOT guess.
-- When useful, include client, company (MSB or Vegas Valley), and rate.
+- If you cannot find the contract, set "found": false and put guidance in "note".
+- Keep "note" to one short sentence. Do not repeat the rate/status already in other fields.
+- Base "status" on the SIGNED CONTRACTS section.
 
 Question: "${question}"
 
@@ -97,11 +154,23 @@ ${signed}`;
 
   const resp = await anthropic.messages.create({
     model: 'claude-sonnet-4-5-20250929',
-    max_tokens: 700,
+    max_tokens: 600,
     messages: [{ role: 'user', content: prompt }]
   });
-  return (resp.content[0] && resp.content[0].text ? resp.content[0].text : '').trim()
-    || "I couldn't find anything matching that in the recent contract history.";
+
+  let raw = (resp.content[0] && resp.content[0].text ? resp.content[0].text : '').trim();
+  // Strip code fences if the model added them
+  if (raw.startsWith('```')) raw = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    // Fallback: convert markdown bold (**) to Slack bold (*) and send as plain text
+    const cleaned = raw.replace(/\*\*(.+?)\*\*/g, '*$1*');
+    return { text: cleaned || 'No result.', blocks: [{ type: 'section', text: { type: 'mrkdwn', text: cleaned || 'No result.' } }] };
+  }
+  return buildAnswerBlocks(data, question);
 }
 
-module.exports = { isContractQuestion, answerContractQuestion };
+module.exports = { isContractQuestion, answerContractQuestion, buildAnswerBlocks };

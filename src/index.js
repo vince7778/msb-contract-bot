@@ -400,7 +400,7 @@ app.event('app_mention', async ({ event, client, say }) => {
       await say({ thread_ts: threadTs, text: ':mag: Looking that up...' });
       try {
         const answer = await answerContractQuestion(anthropic, client, text);
-        await say({ thread_ts: threadTs, text: answer });
+        await say({ thread_ts: threadTs, text: answer.text, blocks: answer.blocks });
       } catch (qErr) {
         console.error('[Query] Error:', qErr.message);
         await say({ thread_ts: threadTs, text: ":x: I couldn't search the contract history just now. Please try again, or check SignWell directly." });
