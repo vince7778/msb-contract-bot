@@ -31,6 +31,57 @@ const pendingContracts = new Map();
 // Auto-expire a pending contract after this long if nobody acts on it.
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+// Active approval cards keyed by channel+client, so re-tagging the same
+// deal updates the existing card instead of posting a duplicate.
+const activeCardByClient = new Map();
+
+// Account value at/above this (USD) gets a "BIG DEAL" highlight on the card.
+const BIG_DEAL_THRESHOLD = Number(process.env.BIG_DEAL_THRESHOLD || 50000);
+
+function normClientKey(channel, clientName) {
+  return `${channel}:${(clientName || '').toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+}
+
+// Build the Slack Block Kit approval card from a pending record.
+function buildApprovalBlocks(pendingId, p) {
+  const fields = [
+    { type: 'mrkdwn', text: `*Account type*\n${p.accountTypeDisplay}` },
+    { type: 'mrkdwn', text: `*Rate / fee*\n${p.rateDisplay}` },
+    { type: 'mrkdwn', text: `*Signer*\n${p.signerName}` },
+    { type: 'mrkdwn', text: `*Signer email*\n${p.hasEmail ? p.recipientEmail : ':warning: missing'}` },
+    { type: 'mrkdwn', text: `*Est. value*\n${p.accountValueDisplay || '\u2014'}` },
+    { type: 'mrkdwn', text: `*Contract type*\n${p.contractType}` }
+  ];
+
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `:memo: *Contract ready for approval* \u2014 *${p.clientName}*  \u00b7  ${p.companyShort}` } }
+  ];
+  if (p.bigDeal) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `:red_circle: *BIG DEAL* \u2014 ${p.accountValueDisplay || 'high value'} \u2014 give this one a careful look.` } });
+  }
+  blocks.push({ type: 'section', fields });
+  if (!p.hasEmail) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: ':warning: *No signer email \u2014 add it before this can be sent.*  Click *Edit* and reply with the email.' } });
+  }
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
+    `*What the client will receive:* an email from ${p.companyShort} (${p.companyEmail}) with the contract attached and a secure e-sign link.` +
+    (p.emailPreview ? `  _Preview:_ \u201c${p.emailPreview}\u2026\u201d` : '')
+  }] });
+
+  const elements = [];
+  if (p.hasEmail) {
+    elements.push({ type: 'button', style: 'primary', text: { type: 'plain_text', text: ':white_check_mark: Approve & Send', emoji: true }, action_id: 'approve_send', value: pendingId });
+  }
+  elements.push({ type: 'button', text: { type: 'plain_text', text: ':pencil2: Edit', emoji: true }, action_id: 'edit_contract', value: pendingId });
+  elements.push({ type: 'button', style: 'danger', text: { type: 'plain_text', text: ':wastebasket: Discard', emoji: true }, action_id: 'discard_contract', value: pendingId });
+  blocks.push({ type: 'actions', block_id: 'contract_review', elements });
+  return blocks;
+}
+
+function chicagoTime() {
+  return new Date().toLocaleString('en-US', { timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' CST';
+}
+
 // ---------------------------------------------------------------------------
 // Process-level safety net — prevent any unhandled socket error from killing
 // the process before our reconnection logic has a chance to run.
@@ -286,76 +337,67 @@ async function generateDocuments(clientData, event, client, say) {
   }
 
   // ============================================================
-  // Manual review before sending (Avery's request)
-  // Instead of auto-sending, post the contract with Send / Discard
-  // buttons. Nothing goes to the client until a team member clicks
-  // "Send for signature". The signed PDF still lands in
-  // #sales-2-contracts via the existing Zapier flow once signed.
+  // Approval gate (Omar's request): never auto-send.
+  // Post an approval card (Approve & Send / Edit / Discard). The
+  // contract only goes to the client when someone clicks Approve & Send.
+  // De-dups by client so re-tagging a deal updates the card in place.
+  // If the signer email is missing, sending is blocked and flagged.
   // ============================================================
-  if (clientData.email) {
+  {
+    const rate = clientData.rate || 30;
+    const rateDisplay = `${rate}%` + (clientData.hasLegalRate && clientData.legalRate ? ` / ${clientData.legalRate}% litigation` : '');
+    const accountTypeDisplay = clientData.accountType || (clientData.isMedical ? 'Medical' : 'Commercial');
+    const bigDeal = typeof clientData.accountValueUSD === 'number' && clientData.accountValueUSD >= BIG_DEAL_THRESHOLD;
+    const emailPreview = (emailText || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+    const clientKey = normClientKey(event.channel, clientData.clientName);
     const pendingId = `c_${event.channel}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    pendingContracts.set(pendingId, {
+
+    const pending = {
       buffer: contractResult.buffer,
       fileName: contractFileName,
       recipientName: clientData.signerName || clientData.clientName,
-      recipientEmail: clientData.email,
+      recipientEmail: clientData.email || null,
+      hasEmail: !!clientData.email,
       company,
+      companyShort: company.shortName,
+      companyEmail: company.email,
       clientName: clientData.clientName,
+      signerName: clientData.signerName || clientData.clientName || '\u2014',
+      accountTypeDisplay,
+      rateDisplay,
+      accountValueDisplay: clientData.accountValue || null,
+      bigDeal,
+      contractType,
+      emailPreview,
+      clientKey,
       createdAt: Date.now()
-    });
+    };
+    pendingContracts.set(pendingId, pending);
 
-    // Auto-expire if nobody acts within the TTL (don't keep the process alive)
-    const expireTimer = setTimeout(() => {
-      pendingContracts.delete(pendingId);
-    }, PENDING_TTL_MS);
+    const expireTimer = setTimeout(() => { pendingContracts.delete(pendingId); }, PENDING_TTL_MS);
     if (expireTimer.unref) expireTimer.unref();
 
-    await client.chat.postMessage({
-      channel: event.channel,
-      thread_ts: event.thread_ts || event.ts,
-      text: `Contract for ${clientData.clientName} is ready for review.`,
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `:mag: *Contract ready for review* \u2014 *${clientData.clientName}*\nReview the contract above. When it looks good, click *Send for signature* and I'll email it to the client. Or *Discard* if it needs a redo.`
-          }
-        },
-        {
-          type: 'context',
-          elements: [{
-            type: 'mrkdwn',
-            text: `Recipient: *${clientData.signerName || clientData.clientName}* (${clientData.email})  \u00b7  From: *${company.shortName}* (${company.email})`
-          }]
-        },
-        {
-          type: 'actions',
-          block_id: 'contract_review',
-          elements: [
-            {
-              type: 'button',
-              style: 'primary',
-              text: { type: 'plain_text', text: ':white_check_mark: Send for signature', emoji: true },
-              action_id: 'send_contract',
-              value: pendingId
-            },
-            {
-              type: 'button',
-              style: 'danger',
-              text: { type: 'plain_text', text: ':wastebasket: Discard', emoji: true },
-              action_id: 'discard_contract',
-              value: pendingId
-            }
-          ]
-        }
-      ]
-    });
-  } else {
-    await say({
-      thread_ts: event.thread_ts || event.ts,
-      text: `:envelope_with_arrow: No client email in the request, so there's nothing to send yet. Reply in this thread with "update email: contact@client.com" and I'll regenerate it with a Send button.`
-    });
+    const blocks = buildApprovalBlocks(pendingId, pending);
+    const fallback = `Contract ready for approval \u2014 ${clientData.clientName}`;
+    const existing = activeCardByClient.get(clientKey);
+
+    if (existing && existing.ts) {
+      // Re-tagged deal: update the existing card, don't post a duplicate.
+      pendingContracts.delete(existing.pendingId);
+      try {
+        await client.chat.update({ channel: event.channel, ts: existing.ts, text: fallback, blocks });
+        activeCardByClient.set(clientKey, { pendingId, ts: existing.ts });
+        pending.cardTs = existing.ts;
+      } catch (e) {
+        const res = await client.chat.postMessage({ channel: event.channel, thread_ts: event.thread_ts || event.ts, text: fallback, blocks });
+        activeCardByClient.set(clientKey, { pendingId, ts: res.ts });
+        pending.cardTs = res.ts;
+      }
+    } else {
+      const res = await client.chat.postMessage({ channel: event.channel, thread_ts: event.thread_ts || event.ts, text: fallback, blocks });
+      activeCardByClient.set(clientKey, { pendingId, ts: res.ts });
+      pending.cardTs = res.ts;
+    }
   }
 
   // Post email in chat
@@ -593,14 +635,14 @@ app.message(async ({ message, say }) => {
 });
 
 // ---------------------------------------------------------------------------
-// Button: Send for signature
+// Button: Approve & Send  (anyone in the channel may approve; we log who)
 // ---------------------------------------------------------------------------
-app.action('send_contract', async ({ ack, body, client, action }) => {
+app.action('approve_send', async ({ ack, body, client, action }) => {
   await ack();
   const pendingId = action.value;
   const channel = body.container && body.container.channel_id;
   const messageTs = body.message && body.message.ts;
-  const clickedBy = body.user && body.user.id ? `<@${body.user.id}>` : 'A team member';
+  const clickedBy = body.user && body.user.id ? `<@${body.user.id}>` : 'a team member';
 
   const pending = pendingContracts.get(pendingId);
   if (!pending) {
@@ -608,9 +650,18 @@ app.action('send_contract', async ({ ack, body, client, action }) => {
       await client.chat.update({
         channel, ts: messageTs,
         text: 'This contract is no longer available to send.',
-        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':information_source: This contract was already handled or has expired. Generate a new one if you still need to send it.' } }]
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':information_source: This draft was already handled or has expired. Generate a new one if you still need to send it.' } }]
       });
-    } catch (e) { console.error('[Send] update failed:', e.message); }
+    } catch (e) { console.error('[Approve] update failed:', e.message); }
+    return;
+  }
+
+  // Guardrail: never send without a signer email.
+  if (!pending.hasEmail || !pending.recipientEmail) {
+    await client.chat.postMessage({
+      channel, thread_ts: messageTs,
+      text: ':warning: Can\u2019t send \u2014 there\u2019s no signer email on this contract. Click *Edit* and reply with the email first.'
+    });
     return;
   }
 
@@ -625,15 +676,18 @@ app.action('send_contract', async ({ ack, body, client, action }) => {
 
     const signingUrl = signResult.recipients && signResult.recipients[0] && signResult.recipients[0].signing_url;
     pendingContracts.delete(pendingId);
+    if (pending.clientKey) activeCardByClient.delete(pending.clientKey);
+
+    console.log(`[Approve] ${pending.clientName} approved+sent by ${clickedBy} at ${new Date().toISOString()}`);
 
     await client.chat.update({
       channel, ts: messageTs,
-      text: `Sent for e-signature: ${pending.clientName}`,
+      text: `Sent to ${pending.clientName}`,
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text:
-          `:writing_hand: *Sent for e-signature via SignWell!*  _(approved by ${clickedBy})_\n` +
+          `:white_check_mark: *Sent to ${pending.clientName}* at ${chicagoTime()} \u2014 approved by ${clickedBy}\n` +
           `\u2022 Recipient: *${pending.recipientName}* (${pending.recipientEmail})\n` +
-          `\u2022 From: *${pending.company.shortName}* (${pending.company.email})\n` +
+          `\u2022 From: *${pending.companyShort}* (${pending.companyEmail})\n` +
           `\u2022 Status: ${signResult.status}` +
           (signingUrl ? `\n\u2022 Signing link: ${signingUrl}` : '')
         } },
@@ -646,12 +700,29 @@ app.action('send_contract', async ({ ack, body, client, action }) => {
     const apiDetail = signError.response && signError.response.data
       ? ` (${JSON.stringify(signError.response.data).slice(0, 200)})`
       : '';
-    console.error('[Send] SignWell error:', signError.message, apiDetail);
+    console.error('[Approve] SignWell error:', signError.message, apiDetail);
     await client.chat.postMessage({
       channel, thread_ts: messageTs,
-      text: `:warning: Couldn't send via SignWell${apiDetail}. The Send button is still active \u2014 try again, or send manually from signwell.com.`
+      text: `:warning: Couldn\u2019t send via SignWell${apiDetail}. The *Approve & Send* button is still active \u2014 try again, or send manually from signwell.com.`
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Button: Edit  (guide the user to reply with a correction)
+// ---------------------------------------------------------------------------
+app.action('edit_contract', async ({ ack, body, client, action }) => {
+  await ack();
+  const channel = body.container && body.container.channel_id;
+  const messageTs = body.message && body.message.ts;
+  const pending = pendingContracts.get(action.value);
+  const clientName = pending ? pending.clientName : 'this contract';
+  try {
+    await client.chat.postMessage({
+      channel, thread_ts: messageTs,
+      text: `:pencil2: To edit *${clientName}*, reply in this thread tagging me with the change \u2014 e.g. \u201c@ContractBot change the rate to 28%\u201d, \u201c@ContractBot update the email to name@client.com\u201d, or \u201c@ContractBot make it commercial\u201d. I\u2019ll refresh the approval card.`
+    });
+  } catch (e) { console.error('[Edit] post failed:', e.message); }
 });
 
 // ---------------------------------------------------------------------------
@@ -662,16 +733,18 @@ app.action('discard_contract', async ({ ack, body, client, action }) => {
   const pendingId = action.value;
   const channel = body.container && body.container.channel_id;
   const messageTs = body.message && body.message.ts;
-  const clickedBy = body.user && body.user.id ? `<@${body.user.id}>` : 'A team member';
+  const clickedBy = body.user && body.user.id ? `<@${body.user.id}>` : 'a team member';
 
+  const pending = pendingContracts.get(pendingId);
   pendingContracts.delete(pendingId);
+  if (pending && pending.clientKey) activeCardByClient.delete(pending.clientKey);
 
   try {
     await client.chat.update({
       channel, ts: messageTs,
       text: 'Contract discarded.',
       blocks: [{ type: 'section', text: { type: 'mrkdwn', text:
-        `:wastebasket: *Discarded* by ${clickedBy}. Nothing was sent to the client. Reply in this thread with changes and I'll generate a new version.`
+        `:wastebasket: *Discarded* by ${clickedBy} at ${chicagoTime()}. Nothing was sent to the client. Reply in this thread tagging me with changes and I\u2019ll generate a new version.`
       } }]
     });
   } catch (e) { console.error('[Discard] update failed:', e.message); }

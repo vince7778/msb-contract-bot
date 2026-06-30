@@ -61,6 +61,9 @@ Extract these fields (null if not found):
 - isMedical: true if medical/healthcare industry detected
 - wantsOnePager: true if user asked for "one pager", "1 pager", "one-pager", "overview"
 - transcript: Background info, call notes, pain points - everything about their situation
+- accountType: one of "Municipal", "Medical", "Commercial", "Education" (best fit: government/city/county/state = Municipal; healthcare/dental/clinic/hospital/patient = Medical; school/university/college/district = Education; any other business = Commercial)
+- accountValue: SHORT display string of the estimated account value or volume if mentioned (e.g. "$300K aging AR", "$17,181", "$1K-$10K per account", "~$25K"); null if not mentioned
+- accountValueUSD: a single NUMBER (no symbols) estimating the total/largest dollar value if determinable from the text, else null
 
 RULES:
 1. Clean asterisks/bullets from clientName
@@ -69,6 +72,8 @@ RULES:
 4. If no rate specified → rate=30 (default)
 5. isMedical=true for: dental, chiro, clinic, hospital, patient, doctor, healthcare
 6. wantsOnePager=true ONLY if they explicitly ask for it
+7. accountType: default "Commercial" if unclear. If isMedical is true, accountType should be "Medical".
+8. accountValueUSD: parse ranges to the high end (e.g. "$1,000 to $10,000" -> 10000; "over 25k" -> 25000; "$300K" -> 300000)
 
 Return ONLY valid JSON:
 {
@@ -83,7 +88,10 @@ Return ONLY valid JSON:
   "hasLegalRate": boolean,
   "isMedical": boolean,
   "wantsOnePager": boolean,
-  "transcript": "string or null"
+  "transcript": "string or null",
+  "accountType": "Municipal" | "Medical" | "Commercial" | "Education",
+  "accountValue": "string or null",
+  "accountValueUSD": number or null
 }`
     }]
   });
