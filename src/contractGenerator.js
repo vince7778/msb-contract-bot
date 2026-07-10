@@ -24,8 +24,17 @@ const TEMPLATES_DIR = path.join(__dirname, '..', 'templates');
  * Get the correct template based on company and medical status
  * Legal rate is handled dynamically (no separate legal templates needed)
  */
-function getTemplatePath(company, isMedical) {
+function getTemplatePath(company, isMedical, isCommercial) {
   const isVegas = company.id === 'vegasvalley';
+
+  // Commercial / B2B takes precedence: Avery's dedicated commercial
+  // template (corrected clauses, 90-day placement verification, both
+  // Standard + Litigation rates, SignWell tags pre-embedded).
+  if (isCommercial) {
+    return isVegas
+      ? path.join(TEMPLATES_DIR, 'VV_Commercial.docx')
+      : path.join(TEMPLATES_DIR, 'MSB_Commercial.docx');
+  }
 
   if (isVegas) {
     return isMedical
@@ -44,10 +53,11 @@ function getTemplatePath(company, isMedical) {
 async function generateContract(clientData) {
   const company = clientData.company || clientData.companyConfig || COMPANIES.msb;
   const isMedical = clientData.isMedical || false;
+  const isCommercial = clientData.isCommercial || false;
   const hasLegalRate = clientData.hasLegalRate || false;
 
-  // Get template path (legal rate is handled dynamically, not via separate template)
-  const templatePath = getTemplatePath(company, isMedical);
+  // Get template path (commercial wins; legal rate handled dynamically)
+  const templatePath = getTemplatePath(company, isMedical, isCommercial);
 
   if (!fs.existsSync(templatePath)) {
     throw new Error(`Template not found: ${templatePath}`);
@@ -74,6 +84,21 @@ async function generateContract(clientData) {
     const clientAddress = cleanText(clientData.address || '[Client Address]');
     const rate = clientData.rate || 30;
     const legalRate = clientData.legalRate || (rate + 10);
+
+    // ============================================================
+    // COMMERCIAL / B2B templates are pre-built by Avery: SignWell tags
+    // are already embedded and both Standard + Litigation rate lines
+    // exist. So we ONLY fill placeholders + rates + Omar's date, and we
+    // do NOT run tag-insertion / legal-rate-paragraph (that would create
+    // duplicate signature fields).
+    // ============================================================
+    if (isCommercial) {
+      docXml = fillCommercialTemplate(docXml, { clientName, clientAddress, today, rate, legalRate, hasLegalRate });
+      zip.updateFile('word/document.xml', Buffer.from(docXml, 'utf8'));
+      const buffer = zip.toBuffer();
+      const contractType = hasLegalRate ? 'Commercial / B2B (Standard + Litigation)' : 'Commercial / B2B';
+      return { buffer, contractType, company: company.shortName, rate, legalRate: hasLegalRate ? legalRate : null };
+    }
 
     // ============================================================
     // STEP 1: Handle split-run placeholders (Non-Medical templates)
@@ -386,7 +411,27 @@ function removeTabRunsAt(xmlStr, at) {
   return xmlStr;
 }
 
+function fillCommercialTemplate(xml, { clientName, clientAddress, today, rate, legalRate, hasLegalRate }) {
+  // Placeholders (single clean runs in these templates)
+  xml = replaceInXml(xml, '[MM/DD/YYYY]', today);
+  xml = replaceInXml(xml, '[CLIENT ADDRESS]', clientAddress);
+  xml = replaceInXml(xml, '[CLIENT NAME]', clientName);
+
+  // Standard Rate: the "25%" is its own run -> always set to requested rate.
+  xml = xml.replace(/<w:t>25%<\/w:t>/g, `<w:t>${rate}%</w:t>`);
+
+  // Litigation Rate: only change when a 2nd rate was given; else leave 30%.
+  if (hasLegalRate && legalRate) {
+    xml = xml.replace('Litigation Rate: 30% of', `Litigation Rate: ${legalRate}% of`);
+  }
+
+  // Fill Omar's blank signing date.
+  xml = fillCollectorSignatureDate(xml, today);
+  return xml;
+}
+
 function insertSignwellDateTag(xml) {
+  if (xml.replace(/<[^>]+>/g, '').includes('verified_date')) return xml; // already tagged
   const marker = '<w:t>Account verified as unpaid as of: </w:t></w:r>';
   const idx = xml.indexOf(marker);
   if (idx === -1) return xml;
@@ -418,6 +463,7 @@ function insertSignwellDateTag(xml) {
  * Tag text is white (invisible); SignWell overlays fields there.
  */
 function insertClientFieldTags(xml) {
+  if (xml.replace(/<[^>]+>/g, '').includes('client_signature')) return xml; // already tagged
   const TAGS = {
     signature:    '{{s:1:y: : :client_signature:160:35}}',
     printName:    '{{af_n:1:y: : :client_print_name:140:18}}',

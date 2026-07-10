@@ -59,6 +59,7 @@ Extract these fields (null if not found):
 - legalRate: Legal/litigation rate as NUMBER (only if TWO rates given like "35% and 45%" or "35%/45%")
 - hasLegalRate: true only if user specified TWO rates (e.g., "35% and 45%", "35%/45% with legal")
 - isMedical: true if medical/healthcare industry detected
+- isCommercial: true if the request says "commercial", "b2b", "B2B", or "business to business" (Avery uses the dedicated commercial template for these)
 - wantsOnePager: true if user asked for "one pager", "1 pager", "one-pager", "overview"
 - transcript: Background info, call notes, pain points - everything about their situation
 - accountType: one of "Municipal", "Medical", "Commercial", "Education" (best fit: government/city/county/state = Municipal; healthcare/dental/clinic/hospital/patient = Medical; school/university/college/district = Education; any other business = Commercial)
@@ -73,6 +74,7 @@ RULES:
 5. isMedical=true for: dental, chiro, clinic, hospital, patient, doctor, healthcare
 6. wantsOnePager=true ONLY if they explicitly ask for it
 7. accountType: default "Commercial" if unclear. If isMedical is true, accountType should be "Medical".
+9. isCommercial=true ONLY if the words "commercial", "b2b", or "business to business" appear in the request.
 8. accountValueUSD: parse ranges to the high end (e.g. "$1,000 to $10,000" -> 10000; "over 25k" -> 25000; "$300K" -> 300000)
 
 Return ONLY valid JSON:
@@ -87,6 +89,7 @@ Return ONLY valid JSON:
   "legalRate": number or null,
   "hasLegalRate": boolean,
   "isMedical": boolean,
+  "isCommercial": boolean,
   "wantsOnePager": boolean,
   "transcript": "string or null",
   "accountType": "Municipal" | "Medical" | "Commercial" | "Education",
@@ -105,6 +108,10 @@ Return ONLY valid JSON:
     if (parsed.clientName) {
       parsed.clientName = cleanClientName(parsed.clientName);
     }
+
+    // Commercial/B2B detection - explicit keyword is authoritative
+    parsed.isCommercial = !!parsed.isCommercial || /\b(commercial|b2b|b-2-b|business[ -]?to[ -]?business)\b/i.test(cleanedText);
+    if (parsed.isCommercial) parsed.accountType = 'Commercial';
 
     // Get full company config
     parsed.companyConfig = parsed.company === 'vegasvalley' ? COMPANIES.vegasvalley : COMPANIES.msb;
@@ -247,6 +254,7 @@ async function parseChangeRequest(anthropic, text, originalContext) {
     legalRate: originalContext.legalRate,
     hasLegalRate: originalContext.hasLegalRate || false,
     isMedical: originalContext.isMedical,
+    isCommercial: originalContext.isCommercial,
     contractDate: originalContext.contractDate || null
   };
 
@@ -268,6 +276,7 @@ Apply changes. Examples:
 - "35% and 45%" → rate: 35, legalRate: 45, hasLegalRate: true
 - "make it medical" → isMedical: true
 - "non-medical" → isMedical: false
+- "make it commercial" / "b2b" → isCommercial: true
 - "change name to X" → clientName: X
 
 Return ONLY valid JSON:
@@ -282,6 +291,7 @@ Return ONLY valid JSON:
   "legalRate": number or null,
   "hasLegalRate": boolean,
   "isMedical": boolean,
+  "isCommercial": boolean,
   "contractDate": "MM/DD/YYYY or null",
   "changesSummary": "what changed"
 }`
@@ -298,6 +308,15 @@ Return ONLY valid JSON:
       ...parsed,
       transcript: originalContext.transcript
     };
+
+    // Commercial/B2B: honor an explicit switch in the change text; never
+    // silently turn it off (keep whatever the original context had).
+    if (/\b(commercial|b2b|b-2-b|business[ -]?to[ -]?business)\b/i.test(text)) {
+      merged.isCommercial = true;
+      merged.accountType = 'Commercial';
+    } else {
+      merged.isCommercial = !!merged.isCommercial;
+    }
 
     if (merged.clientName) {
       merged.clientName = cleanClientName(merged.clientName);
