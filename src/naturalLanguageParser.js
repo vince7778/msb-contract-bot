@@ -110,7 +110,7 @@ Return ONLY valid JSON:
     }
 
     // Commercial/B2B detection - explicit keyword is authoritative
-    parsed.isCommercial = !!parsed.isCommercial || /\b(commercial|b2b|b-2-b|business[ -]?to[ -]?business)\b/i.test(cleanedText);
+    parsed.isCommercial = resolveCommercial(cleanedText, parsed.isCommercial);
     if (parsed.isCommercial) parsed.accountType = 'Commercial';
 
     // Get full company config
@@ -309,13 +309,16 @@ Return ONLY valid JSON:
       transcript: originalContext.transcript
     };
 
-    // Commercial/B2B: honor an explicit switch in the change text; never
-    // silently turn it off (keep whatever the original context had).
-    if (/\b(commercial|b2b|b-2-b|business[ -]?to[ -]?business)\b/i.test(text)) {
+    // Commercial/B2B: honor an explicit switch in the change text,
+    // including explicit negation ("make it consumer, not b2b").
+    const commercialInChange = resolveCommercial(text, null);
+    if (commercialInChange === true) {
       merged.isCommercial = true;
       merged.accountType = 'Commercial';
+    } else if (commercialInChange === false && MENTIONS_COMMERCIAL.test(text)) {
+      merged.isCommercial = false;   // explicitly turned off
     } else {
-      merged.isCommercial = !!merged.isCommercial;
+      merged.isCommercial = !!merged.isCommercial;  // unchanged
     }
 
     if (merged.clientName) {
@@ -330,6 +333,28 @@ Return ONLY valid JSON:
     console.error('Failed to parse change request:', e);
     return { ...originalContext, changesSummary: 'Could not parse changes' };
   }
+}
+
+
+// Words that indicate commercial/B2B, and explicit negations of them.
+const MENTIONS_COMMERCIAL = /\b(commercial|b2b|b-2-b|business[ -]?to[ -]?business)\b/i;
+// Catches "not commercial", "non-commercial", "not b2b", "not commercial or b2b"
+const NEGATES_COMMERCIAL = /\b(?:not|non)[\s-]*(?:commercial|b2b|b-2-b|business[ -]?to[ -]?business)\b/i;
+
+/**
+ * Decide whether a request is commercial/B2B.
+ * An explicit negation ("consumer, not commercial or b2b") always wins —
+ * this prevents the word "commercial" inside a negation from wrongly
+ * selecting the B2B template. Otherwise the AI's judgement is used, with
+ * a plain keyword mention as a fallback.
+ * @returns {boolean|null} true/false, or null when nothing was said
+ */
+function resolveCommercial(text, aiValue) {
+  const t = text || '';
+  if (NEGATES_COMMERCIAL.test(t)) return false;
+  if (MENTIONS_COMMERCIAL.test(t)) return true;
+  if (aiValue === null || aiValue === undefined) return null;
+  return !!aiValue;
 }
 
 module.exports = {
