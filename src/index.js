@@ -133,7 +133,14 @@ function createApp() {
 
 // Initialize Claude (shared across reconnects — stateless)
 const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  // Claude's API occasionally returns 429/5xx/529 "Overloaded" when busy.
+  // The SDK retries these automatically with exponential backoff, but the
+  // default of 2 attempts burns out in seconds during a real spike and the
+  // whole contract request fails. 5 gives it a much better chance to ride
+  // out a short overload instead of erroring in front of the sales team.
+  maxRetries: 5,
+  timeout: 120000 // 2 min - long transcripts make for slow calls
 });
 
 // Download file from Slack - tries multiple methods
@@ -230,6 +237,24 @@ function isChangeRequest(text) {
     'address is', 'add ', 'remove '
   ];
   return changeIndicators.some(phrase => lowerText.includes(phrase));
+}
+
+// ---------------------------------------------------------------------------
+// Turn raw API errors into something a salesperson can act on.
+// Transient upstream failures (Claude overloaded, gateway timeouts) are not
+// the user's fault and are almost always fixed by retrying.
+// ---------------------------------------------------------------------------
+function friendlyError(error) {
+  const raw = `${(error && error.message) || error || ''}`;
+  const status = (error && (error.status || error.statusCode)) || 0;
+  const transient = /overloaded|529|503|502|504|rate.?limit|429|timeout|ETIMEDOUT|ECONNRESET|socket hang up/i.test(raw)
+    || [429, 500, 502, 503, 504, 529].includes(status);
+
+  if (transient) {
+    return ':warning: *Claude\u2019s API is busy right now* \u2014 that\u2019s a temporary hiccup on their side, not a problem with your request.\n\n' +
+      'Just send the same request again in a moment and it should go through. (I already retry automatically a few times before showing this.)';
+  }
+  return `:x: Sorry, I ran into an error: ${raw}\n\nPlease try again, or send this to Vince if it keeps happening.`;
 }
 
 // Generate all documents for a client
@@ -637,7 +662,7 @@ app.event('app_mention', async ({ event, client, say }) => {
     console.error('Error:', error);
     await say({
       thread_ts: event.thread_ts || event.ts,
-      text: `:x: Sorry, I ran into an error: ${error.message}\n\nPlease try again or contact support.`
+      text: friendlyError(error)
     });
   }
 });
