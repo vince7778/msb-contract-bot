@@ -224,7 +224,10 @@ function isChangeRequest(text) {
   const changeIndicators = [
     'change', 'update', 'fix', 'modify', 'edit', 'actually', 'instead',
     'make it', 'should be', 'wrong', 'correct', 'revise', 'redo',
-    'regenerate', 're-generate', 'try again', 'not right'
+    'regenerate', 're-generate', 'try again', 'not right',
+    // natural edit phrasings used in a contract thread (no change-verb)
+    'set the', 'switch to', 'rate is', 'rate to', 'email is', 'signer is',
+    'address is', 'add ', 'remove '
   ];
   return changeIndicators.some(phrase => lowerText.includes(phrase));
 }
@@ -436,19 +439,6 @@ app.event('app_mention', async ({ event, client, say }) => {
       return;
     }
 
-    // Check if this is a QUESTION about existing contracts (lookup, not create)
-    if (isContractQuestion(text)) {
-      console.log('[Bot] Contract question detected, looking up...');
-      await say({ thread_ts: threadTs, text: ':mag: Looking that up...' });
-      try {
-        const answer = await answerContractQuestion(anthropic, client, text);
-        await say({ thread_ts: threadTs, text: answer.text, blocks: answer.blocks });
-      } catch (qErr) {
-        console.error('[Query] Error:', qErr.message);
-        await say({ thread_ts: threadTs, text: ":x: I couldn't search the contract history just now. Please try again, or check SignWell directly." });
-      }
-      return;
-    }
 
     // Check if user uploaded a Word document for editing
     if (event.files && event.files.length > 0) {
@@ -561,6 +551,31 @@ app.event('app_mention', async ({ event, client, say }) => {
 
         return;
       }
+    }
+
+    // Check if this is a QUESTION about existing contracts (lookup, not create).
+    // Runs AFTER the change branch so in-thread edits are never hijacked.
+    // Inside a contract thread we require a real question signal ("?" or a
+    // leading question word); otherwise the message is treated as an edit.
+    if (isContractQuestion(text)) {
+      const inContractThread = isInThread && !!recall(event.channel, threadTs);
+      const cleaned = text.replace(/<@[A-Z0-9]+>/gi, ' ').trim();
+      const looksLikeRealQuestion = /\?/.test(cleaned) ||
+        /^(was|is|are|did|do|does|have|what|which|who|when|where|how|find|look|search|show|list|tell)\b/i.test(cleaned);
+
+      if (!inContractThread || looksLikeRealQuestion) {
+        console.log('[Bot] Contract question detected, looking up...');
+        await say({ thread_ts: threadTs, text: ':mag: Looking that up...' });
+        try {
+          const answer = await answerContractQuestion(anthropic, client, text);
+          await say({ thread_ts: threadTs, text: answer.text, blocks: answer.blocks });
+        } catch (qErr) {
+          console.error('[Query] Error:', qErr.message);
+          await say({ thread_ts: threadTs, text: ":x: I couldn't search the contract history just now. Please try again, or check SignWell directly." });
+        }
+        return;
+      }
+      // else: fall through - it's an edit inside a contract thread
     }
 
     // Check if this is a new client request
