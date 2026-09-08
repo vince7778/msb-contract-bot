@@ -9,6 +9,8 @@ const COMPANIES = {
     name: 'Midwest Service Bureau, LLC',
     shortName: 'Midwest Service Bureau',
     tagline: 'COLLECTIONS SPECIALISTS SINCE 1970',
+    // the MSB logo lockup already includes the name + this tagline
+    logoHasTagline: true,
     address: '625 W Maple St., Wichita, KS 67213',
     nmls: '2671949',
     phone: '(316) 267-8300',
@@ -30,6 +32,8 @@ const COMPANIES = {
     name: 'Vegas Valley Collection Service',
     shortName: 'Vegas Valley Collection Service',
     tagline: 'NEVADA\'S TRUSTED COLLECTION EXPERTS',
+    // the VV logo has the name but NOT the tagline - print it below
+    logoHasTagline: false,
     addresses: [
       '304 S. Jones Blvd #2596, Las Vegas, NV 89107'
     ],

@@ -344,9 +344,11 @@ function createStunningOnePager(clientData, company, content) {
       ]})]
     })];
   } else if (logoRun) {
-    // Wide banner logo is a full lockup (mark + company name + tagline),
-    // so it stands alone - adding the wordmark/tagline would duplicate them.
-    brandCell = [new Paragraph({ children: [logoRun] })];
+    // Wide banner logo already contains the company name, so the wordmark
+    // is never repeated. The tagline is only printed when the logo itself
+    // doesn't already include it (see logoHasTagline in companyConfig).
+    brandCell = [new Paragraph({ spacing: { after: company.logoHasTagline ? 0 : 60 }, children: [logoRun] })];
+    if (!company.logoHasTagline) brandCell.push(taglinePara);
   } else {
     brandCell = [wordmarkPara, taglinePara];
   }
