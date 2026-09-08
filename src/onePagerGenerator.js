@@ -286,7 +286,7 @@ function createStunningOnePager(clientData, company, content) {
       if (dim) {
         logoAspect = dim.width / dim.height;
         if (logoAspect >= 3) {          // wide banner logo
-          w = Math.min(210, 54 * logoAspect); h = w / logoAspect;
+          w = Math.min(232, 60 * logoAspect); h = w / logoAspect;
         } else {                         // square / tall monogram
           h = 64; w = h * logoAspect;   // monogram: a touch larger for presence
         }
@@ -344,8 +344,9 @@ function createStunningOnePager(clientData, company, content) {
       ]})]
     })];
   } else if (logoRun) {
-    // Wide banner logo already contains the name - show it alone.
-    brandCell = [new Paragraph({ spacing: { after: 40 }, children: [logoRun] }), taglinePara];
+    // Wide banner logo is a full lockup (mark + company name + tagline),
+    // so it stands alone - adding the wordmark/tagline would duplicate them.
+    brandCell = [new Paragraph({ children: [logoRun] })];
   } else {
     brandCell = [wordmarkPara, taglinePara];
   }
