@@ -15,7 +15,7 @@ const COMPANIES = {
     nmls: '2671949',
     phone: '(316) 267-8300',
     email: 'info@msbureau.com',
-    website: 'www.msbureau.com',
+    website: 'https://msbureau.com',
     defaultRate: 30,
     legalRateAddon: 10, // Legal rate = standard + this
     licensing: 'nationwide', // MSB operates nationwide
@@ -41,7 +41,7 @@ const COMPANIES = {
     nmls: '2364012',
     phone: '(702) 645-9710',
     email: 'info@vegascollect.com',
-    website: 'vegascollect.com',
+    website: 'https://vegascollect.com',
     defaultRate: 30,
     legalRateAddon: 10,
     licensing: 'Nevada only', // Vegas Valley is ONLY licensed in Nevada

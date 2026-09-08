@@ -10,7 +10,7 @@
  */
 
 const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-  AlignmentType, BorderStyle, WidthType, ShadingType, ImageRun,
+  AlignmentType, BorderStyle, WidthType, ShadingType, ImageRun, ExternalHyperlink,
   HeightRule, VerticalAlign, convertInchesToTwip } = require('docx');
 const { COMPANIES } = require('./companyConfig');
 const fs = require('fs');
@@ -463,7 +463,15 @@ function createStunningOnePager(clientData, company, content) {
   children.push(new Paragraph({
     alignment: AlignmentType.CENTER,
     spacing: { after: 60 },
-    children: [new TextRun({ text: `${company.phone}     ${company.website}     ${company.address}`, size: 17, color: BODY })]
+    children: [
+      new TextRun({ text: `${company.phone}     `, size: 17, color: BODY }),
+      // clickable in the PDF, and shows the full https:// address
+      new ExternalHyperlink({
+        link: company.website,
+        children: [new TextRun({ text: company.website, size: 17, color: ACCENT })]
+      }),
+      new TextRun({ text: `     ${company.address}`, size: 17, color: BODY })
+    ]
   }));
   children.push(new Paragraph({
     alignment: AlignmentType.CENTER,
