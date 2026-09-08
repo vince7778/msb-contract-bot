@@ -72,39 +72,54 @@ COLLECTION COMPANY:
 - Tagline: ${company.tagline}
 - Coverage: ${isVegas ? 'Nevada-based, serving Nevada businesses' : 'Nationwide service since 1970'}
 
-YOUR TASK: Create compelling, FACTUAL content for a one-pager. Return JSON with:
+YOUR TASK: Write a one-pager the prospect can hand to a decision-maker. It must answer
+their questions, explain our services, and make the case for why we are the right agency
+FOR THEM specifically. Mine the transcript hard - pull out real figures, aging, account
+counts, industry details, objections they raised, and what they said they need. Reference
+those specifics; generic marketing copy is a failure.
+
+Use **double asterisks** to bold the few most important facts inside bullets (dollar
+amounts, aging, key capabilities). Bold 1-2 phrases per bullet at most.
+
+Return JSON with:
 
 {
-  "headline": "A powerful 8-12 word headline that speaks directly to their pain (recovering money, stopping losses, etc.)",
+  "headline": "A sharp 8-14 word headline naming the outcome they want, in their language",
 
-  "personalIntro": "A 2-3 sentence intro addressing ${firstName || 'the business owner'} directly. Reference their specific industry/situation if known from the transcript. Be empathetic about their collections challenges.",
+  "personalIntro": "3-4 sentences to ${firstName || 'the decision maker'}. Name their business model/industry, the specific situation from the transcript, and the tension they care about (money AND relationships/reputation/time). End on the no-risk point: they pay nothing unless we collect.",
 
   "theirProblem": {
-    "title": "Short title for their challenge section (4-6 words)",
-    "points": ["3 specific challenges they face based on their industry - be concrete and relatable, not generic"]
+    "title": "WHAT YOU'RE DEALING WITH",
+    "points": ["3 bullets grounded in the transcript. Lead with their real numbers/aging where known (bold them). Name the operational cost and the relationship/reputation risk, not just 'unpaid invoices'."]
   },
 
   "ourSolution": {
-    "title": "Short title for solution section (4-6 words)",
-    "points": ["3 matching solutions - explain HOW we solve each problem above. Be specific about our approach."]
+    "title": "HOW WE HANDLE IT",
+    "points": ["3 bullets that map 1:1 to the problems above. Explain the actual mechanics - dedicated team, skip tracing, escalation path, documentation handling, compliance - so it reads as a real process, not a promise."]
   },
 
   "whyUs": {
-    "title": "Why ${company.shortName}? (or similar)",
-    "points": ["4 key differentiators - FACTUAL only: ${isVegas ? 'Nevada expertise, local presence' : '55+ years experience, nationwide reach'}, performance-based fees (${rate}%), legal resources, compliance expertise"]
+    "title": "Why ${company.shortName}?",
+    "points": ["4 SHORT credibility pillars (max ~12 words each). FACTUAL only: ${isVegas ? 'Nevada-licensed, NRS 649 built, all 17 counties' : '55+ years since 1970, nationwide, licensed & bonded'}, 100% contingency, industry fit for their sector, legal/skip-trace capability."]
   },
 
-  "callToAction": "A compelling 1-sentence call to action - create urgency without being pushy",
+  "whatWeNeed": ["4 SHORT items (3-6 words each) we need to start, tailored to their sector - e.g. billing history & current balance, any payment history, contact history / updated info, proof of debt or signed agreements"],
 
-  "closingNote": "A brief, warm closing note (1 sentence) that reinforces partnership"
+  "onboarding": "2 sentences: how placement actually works (submit manually or connect by integration, track status and recovered amounts in real time) and one reassurance that fits their situation from the transcript (e.g. missing signed agreements are still workable).",
+
+  "callToAction": "1 sentence telling them exactly what to send us and what they get back, with no cost to look",
+
+  "closingNote": "A short partnership line, e.g. a long-term recovery partner - not a one-time vendor"
 }
 
 CRITICAL RULES:
-- NO FAKE STATISTICS (don't invent recovery rates, client counts, or percentages)
-- Be specific to their industry when possible
-- Sound professional but warm, not salesy
-- Focus on THEIR benefits, not our features
-- If you don't know something from the transcript, keep it general but relevant
+- NO FAKE STATISTICS. Never invent recovery rates, client counts, or percentages.
+- Use ONLY figures the transcript actually contains. If the transcript gives a balance,
+  aging, or account count, USE IT - that specificity is the whole point.
+- Do NOT state a contingency percentage anywhere. Pricing is described only as
+  performance-based and flexible with volume (handled separately in the layout).
+- Sound like a specialist who listened to the call, not a brochure.
+- If the transcript is thin, stay concrete about their INDUSTRY rather than inventing details.
 
 Return ONLY valid JSON, no markdown or explanation.`
       }]
@@ -179,9 +194,15 @@ function getSmartFallback(clientData, company) {
       ]
     },
 
-    callToAction: "Let's discuss how we can start recovering your outstanding balances this week.",
+    whatWeNeed: isMedical
+      ? ['Billing history & current balance', 'Any payment history', 'Patient contact information', 'Itemized statements or EOBs']
+      : ['Billing history & current balance', 'Any payment history', 'Contact history / updated info', 'Proof of debt or signed agreements'],
 
-    closingNote: "We're here to be your trusted partner in getting paid what you've earned."
+    onboarding: 'Submit accounts manually or connect directly to your system, then track status, activity, and recovered amounts in real time. Missing paperwork on a few accounts? We can usually still work them.',
+
+    callToAction: "Send us your aging file and we'll show you exactly what's recoverable — at no cost to look.",
+
+    closingNote: 'A long-term recovery partner — not a one-time vendor.'
   };
 }
 
@@ -198,6 +219,50 @@ function getSmartFallback(clientData, company) {
  * Read intrinsic pixel dimensions from a PNG (IHDR chunk) so logos are
  * never stretched out of their true aspect ratio.
  */
+
+/**
+ * Turn "plain **bold** plain" into TextRuns so the AI can emphasise the
+ * facts that matter (dollar figures, aging, key capabilities).
+ */
+
+// Small labelled panel used for "What we need" / "Onboarding".
+function infoCell(label, bodyParagraphs, width, accent, muted, rule, tight) {
+  const S = (r, c) => (tight ? c : r);
+  return new TableCell({
+    width: { size: width, type: WidthType.DXA },
+    borders: {
+      top: { style: BorderStyle.SINGLE, size: 4, color: rule },
+      left: { style: BorderStyle.SINGLE, size: 4, color: rule },
+      bottom: { style: BorderStyle.SINGLE, size: 4, color: rule },
+      right: { style: BorderStyle.SINGLE, size: 4, color: rule }
+    },
+    margins: { top: S(150, 110), bottom: S(150, 115), left: 190, right: 170 },
+    children: [
+      new Paragraph({
+        spacing: { after: 0 },
+        children: [new TextRun({ text: label, bold: true, size: 15, color: muted, characterSpacing: 26 })]
+      }),
+      ...bodyParagraphs
+    ]
+  });
+}
+
+function richRuns(text, { size, color, boldColor, forceBold }) {
+  const out = [];
+  const parts = `${text || ''}`.split(/\*\*/);
+  parts.forEach((part, i) => {
+    if (!part) return;
+    const isBold = forceBold || i % 2 === 1;
+    out.push(new TextRun({
+      text: part,
+      size,
+      bold: isBold,
+      color: (i % 2 === 1) ? (boldColor || color) : color
+    }));
+  });
+  return out.length ? out : [new TextRun({ text: '', size })];
+}
+
 function pngSize(buf) {
   try {
     if (!buf || buf.length < 24) return null;
@@ -210,31 +275,39 @@ function pngSize(buf) {
 
 function clampContent(c) {
   const cut = (text, max) => {
-    const t = `${text || ''}`.trim();
-    if (t.length <= max) return t;
-    const slice = t.slice(0, max);
-    const lastSpace = slice.lastIndexOf(' ');
-    return (lastSpace > max * 0.6 ? slice.slice(0, lastSpace) : slice).replace(/[,;:\-\s]+$/, '') + '\u2026';
+    let t = `${text || ''}`.trim();
+    if (t.length > max) {
+      const slice = t.slice(0, max);
+      const lastSpace = slice.lastIndexOf(' ');
+      t = (lastSpace > max * 0.6 ? slice.slice(0, lastSpace) : slice).replace(/[,;:\-\s]+$/, '') + '\u2026';
+    }
+    // never leave an unclosed **bold** marker behind
+    if (((t.match(/\*\*/g) || []).length % 2) === 1) t = t.replace(/\*\*(?![\s\S]*\*\*)/, '');
+    return t;
   };
   const pts = (arr, max, keep) => (Array.isArray(arr) ? arr : []).slice(0, keep).map(p => cut(p, max));
+  // these render as plain text, so any bold markers must be removed
+  const plain = (t) => `${t || ''}`.replace(/\*\*/g, '');
 
   return {
-    headline: cut(c.headline, 110),
-    personalIntro: cut(c.personalIntro, 540),
+    headline: plain(cut(c.headline, 110)),
+    personalIntro: cut(c.personalIntro, 470),
     theirProblem: {
-      title: cut(c.theirProblem && c.theirProblem.title, 46),
-      points: pts(c.theirProblem && c.theirProblem.points, 250, 3)
+      title: plain(cut(c.theirProblem && c.theirProblem.title, 46)),
+      points: pts(c.theirProblem && c.theirProblem.points, 215, 3)
     },
     ourSolution: {
-      title: cut(c.ourSolution && c.ourSolution.title, 46),
-      points: pts(c.ourSolution && c.ourSolution.points, 250, 3)
+      title: plain(cut(c.ourSolution && c.ourSolution.title, 46)),
+      points: pts(c.ourSolution && c.ourSolution.points, 215, 3)
     },
     whyUs: {
-      title: cut(c.whyUs && c.whyUs.title, 46),
-      points: pts(c.whyUs && c.whyUs.points, 175, 4)
+      title: plain(cut(c.whyUs && c.whyUs.title, 46)),
+      points: pts(c.whyUs && c.whyUs.points, 95, 4).map(plain)
     },
-    callToAction: cut(c.callToAction, 230),
-    closingNote: cut(c.closingNote, 130)
+    whatWeNeed: pts(c.whatWeNeed, 42, 4).map(plain),
+    onboarding: cut(c.onboarding, 260),
+    callToAction: cut(c.callToAction, 190),
+    closingNote: plain(cut(c.closingNote, 90))
   };
 }
 
@@ -260,11 +333,12 @@ function createStunningOnePager(clientData, company, content) {
   // "one-pager" is never two pages.
   // ---------------------------------------------------------------
   const weight = [
-    content.headline, content.personalIntro, content.callToAction,
+    content.headline, content.personalIntro, content.callToAction, content.onboarding,
     ...(content.theirProblem.points || []), ...(content.ourSolution.points || []),
-    ...(content.whyUs.points || [])
+    ...(content.whyUs.points || []), ...(content.whatWeNeed || [])
   ].join(' ').length;
-  const tight = weight > 2450;   // typical content (~1950) stays roomy
+  // The sheet now carries pricing + requirements + onboarding, so it compacts sooner.
+  const tight = weight > 1150;
   const S = (roomy, compact) => (tight ? compact : roomy);
 
   const CW = 10840;               // content width (US Letter, 0.49" margins)
@@ -372,8 +446,13 @@ function createStunningOnePager(clientData, company, content) {
         children: [
           new Paragraph({ alignment: AlignmentType.RIGHT, spacing: { after: 20 },
             children: [new TextRun({ text: 'PREPARED FOR', size: 13, color: MUTED, characterSpacing: 30 })] }),
+          new Paragraph({ alignment: AlignmentType.RIGHT, spacing: { after: 20 },
+            children: [new TextRun({ text: clientData.clientName || 'Valued Client', bold: true, size: 24, color: INK })] }),
           new Paragraph({ alignment: AlignmentType.RIGHT,
-            children: [new TextRun({ text: clientData.clientName || 'Valued Client', bold: true, size: 24, color: INK })] })
+            children: [new TextRun({
+              text: (clientData.signerName ? `Attn: ${clientData.signerName}  \u00b7  ` : '') +
+                new Date().toLocaleDateString('en-US', { timeZone: 'America/Chicago', month: 'long', day: 'numeric', year: 'numeric' }),
+              size: 15, color: MUTED })] })
         ]
       })
     ]})]
@@ -388,14 +467,14 @@ function createStunningOnePager(clientData, company, content) {
 
   // ================= HEADLINE =================
   children.push(new Paragraph({
-    spacing: { before: S(420, 250), after: S(180, 120), line: 320 },
+    spacing: { before: S(330, 210), after: S(150, 105), line: 310 },
     children: [new TextRun({ text: content.headline, bold: true, size: S(34, 30), color: INK })]
   }));
 
   // ================= INTRO =================
   children.push(new Paragraph({
-    spacing: { after: S(400, 250), line: S(330, 300) },
-    children: [new TextRun({ text: content.personalIntro, size: S(22, 20), color: BODY })]
+    spacing: { after: S(320, 210), line: S(320, 290) },
+    children: richRuns(content.personalIntro, { size: S(22, 20), color: BODY, boldColor: INK })
   }));
 
   // ================= CHALLENGE / SOLUTION =================
@@ -408,19 +487,19 @@ function createStunningOnePager(clientData, company, content) {
         sectionHeaderCell(content.ourSolution.title, CW - HALF, TINT, INK, ACCENT)
       ]}),
       new TableRow({ children: [
-        bulletCell(content.theirProblem.points, HALF, MUTED, BODY, cellBorders, tight),
-        bulletCell(content.ourSolution.points, CW - HALF, ACCENT, BODY, cellBorders, tight)
+        bulletCell(content.theirProblem.points, HALF, MUTED, BODY, cellBorders, tight, INK),
+        bulletCell(content.ourSolution.points, CW - HALF, ACCENT, BODY, cellBorders, tight, ACCENT)
       ]})
     ]
   }));
 
   // ================= WHY US =================
   children.push(new Paragraph({
-    spacing: { before: S(480, 300), after: 40 },
+    spacing: { before: S(360, 240), after: 40 },
     children: [new TextRun({ text: content.whyUs.title.toUpperCase(), bold: true, size: 18, color: ACCENT, characterSpacing: 30 })]
   }));
   children.push(new Paragraph({
-    spacing: { after: S(220, 150) },
+    spacing: { after: S(180, 130) },
     border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: RULE, space: 1 } },
     children: [new TextRun({ text: '', size: 2 })]
   }));
@@ -435,8 +514,57 @@ function createStunningOnePager(clientData, company, content) {
     )})]
   }));
 
+  // ================= PRICING: FLEXIBLE, NO RISK =================
+  // (No rate table - per Vince, rates flex with volume and are quoted per deal.)
+  children.push(spacer(S(300, 190)));
+  children.push(new Table({
+    width: { size: CW, type: WidthType.DXA },
+    columnWidths: [CW],
+    rows: [new TableRow({ children: [new TableCell({
+      width: { size: CW, type: WidthType.DXA },
+      shading: { fill: TINT, type: ShadingType.CLEAR },
+      borders: {
+        top: { style: BorderStyle.SINGLE, size: 4, color: RULE },
+        left: { style: BorderStyle.SINGLE, size: 14, color: ACCENT },
+        bottom: { style: BorderStyle.SINGLE, size: 4, color: RULE },
+        right: { style: BorderStyle.SINGLE, size: 4, color: RULE }
+      },
+      margins: { top: S(150, 110), bottom: S(150, 110), left: 200, right: 180 },
+      children: [
+        new Paragraph({ spacing: { after: 50 }, children: [
+          new TextRun({ text: '100% contingency \u2014 you only pay on what we recover.', bold: true, size: S(20, 18), color: INK })
+        ]}),
+        new Paragraph({ spacing: { line: S(280, 260) }, children: [
+          new TextRun({ text: 'No signup, submission, monthly, or yearly fees. Our rates are flexible and improve with the volume you place \u2014 tell us what you have and we\u2019ll quote it.', size: S(18, 17), color: BODY })
+        ]})
+      ]
+    })]})]
+  }));
+
+  // ================= WHAT WE NEED / ONBOARDING =================
+  children.push(spacer(S(280, 180)));
+  children.push(new Table({
+    width: { size: CW, type: WidthType.DXA },
+    columnWidths: [HALF, CW - HALF],
+    rows: [new TableRow({ children: [
+      infoCell('WHAT WE NEED TO GET STARTED', (content.whatWeNeed || []).map(
+        t => new Paragraph({
+          spacing: { before: 70, after: 0, line: S(270, 250) },
+          indent: { left: 180, hanging: 180 },
+          children: [
+            new TextRun({ text: '\u2713  ', bold: true, color: ACCENT, size: S(18, 17) }),
+            new TextRun({ text: t, size: S(18, 17), color: BODY })
+          ]
+        })), HALF, ACCENT, MUTED, RULE, tight),
+      infoCell('ONBOARDING', [new Paragraph({
+        spacing: { before: 70, line: S(275, 255) },
+        children: richRuns(content.onboarding, { size: S(18, 17), color: BODY, boldColor: INK })
+      })], CW - HALF, ACCENT, MUTED, RULE, tight)
+    ]})]
+  }));
+
   // ================= CALL TO ACTION =================
-  children.push(spacer(S(500, 280)));
+  children.push(spacer(S(300, 190)));
   children.push(new Table({
     width: { size: CW, type: WidthType.DXA },
     columnWidths: [CW],
@@ -444,19 +572,19 @@ function createStunningOnePager(clientData, company, content) {
       width: { size: CW, type: WidthType.DXA },
       shading: { fill: ACCENT, type: ShadingType.CLEAR },
       borders: { top: none, left: none, bottom: none, right: none },
-      margins: { top: S(220, 150), bottom: S(220, 150), left: 300, right: 300 },
+      margins: { top: S(170, 125), bottom: S(170, 125), left: 300, right: 300 },
       verticalAlign: VerticalAlign.CENTER,
       children: [new Paragraph({
         alignment: AlignmentType.CENTER,
         spacing: { line: 300 },
-        children: [new TextRun({ text: content.callToAction, bold: true, size: S(22, 20), color: WHITE })]
+        children: richRuns(content.callToAction, { size: S(22, 20), color: WHITE, boldColor: WHITE, forceBold: true })
       })]
     })]})]
   }));
 
   // ================= FOOTER =================
   children.push(new Paragraph({
-    spacing: { before: S(460, 260), after: S(140, 100) },
+    spacing: { before: S(320, 200), after: S(120, 90) },
     border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: RULE, space: 1 } },
     children: [new TextRun({ text: '', size: 2 })]
   }));
@@ -523,20 +651,20 @@ function sectionHeaderCell(text, width, fill, textColor, accent) {
 }
 
 // Clean dash bullets in a single tone - no red/green dot noise.
-function bulletCell(points, width, bulletColor, textColor, borders, tight) {
+function bulletCell(points, width, bulletColor, textColor, borders, tight, boldColor) {
   const S = (r, c) => (tight ? c : r);
   const paragraphs = (points || []).map((point, i) => new Paragraph({
     spacing: { before: i === 0 ? 0 : S(120, 80), after: 0, line: S(290, 265) },
     indent: { left: 200, hanging: 200 },
     children: [
       new TextRun({ text: '\u2014  ', bold: true, color: bulletColor, size: S(20, 18) }),
-      new TextRun({ text: point, size: S(20, 18), color: textColor })
+      ...richRuns(point, { size: S(20, 18), color: textColor, boldColor: boldColor || textColor })
     ]
   }));
   return new TableCell({
     width: { size: width, type: WidthType.DXA },
     borders,
-    margins: { top: S(190, 130), bottom: S(210, 140), left: 180, right: 160 },
+    margins: { top: S(150, 115), bottom: S(160, 120), left: 180, right: 160 },
     children: paragraphs.length ? paragraphs : [new Paragraph({ children: [new TextRun({ text: '' })] })]
   });
 }
@@ -552,7 +680,7 @@ function pillarCell(text, width, accent, textColor, muted, tight) {
       bottom: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
       right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' }
     },
-    margins: { top: S(180, 130), bottom: S(140, 80), left: 90, right: 130 },
+    margins: { top: S(140, 110), bottom: S(110, 70), left: 90, right: 130 },
     verticalAlign: VerticalAlign.TOP,
     children: [new Paragraph({
       spacing: { line: S(280, 255) },
