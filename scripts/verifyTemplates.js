@@ -55,21 +55,30 @@ function main() {
 
     // Governing law and the Collector address must match the licensed state:
     // Vegas Valley is Nevada-only (NRS 649); MSB is Kansas.
+    // Governing law must match the licensed state: Vegas Valley is Nevada-only
+    // (NRS 649), MSB is Kansas. Both Vegas Valley addresses are expected on a
+    // VV contract - the Wichita office is the shared back office, the Las
+    // Vegas one is the Nevada entity's own address - so the address is NOT
+    // what identifies the entity here. Only the governing law is.
     const flat = text.replace(/\s+/g, ' ');
     if (isVV) {
-      if (/\bKansas\b/.test(flat)) issues.push('mentions Kansas');
-      if (/Wichita|67213/.test(flat)) issues.push('carries the Wichita address');
+      if (/(?:State of|laws of|conducted in)\s+Kansas/.test(flat)) {
+        issues.push('governing law or venue still says Kansas');
+      }
       if (!/State of Nevada/.test(flat)) issues.push('governing law is not Nevada');
       if (!/Jones Blvd/.test(flat)) issues.push('missing the Las Vegas address');
+      if (!/Wichita/.test(flat)) issues.push('missing the Wichita address');
     } else {
-      if (/\bNevada\b/.test(flat)) issues.push('mentions Nevada');
+      if (/(?:State of|laws of|conducted in)\s+Nevada/.test(flat)) {
+        issues.push('governing law or venue says Nevada');
+      }
       if (/Jones Blvd/.test(flat)) issues.push('carries the Las Vegas address');
       if (!/State of Kansas/.test(flat)) issues.push('governing law is not Kansas');
     }
 
     const ok = issues.length === 0;
     if (!ok) problems.push(`${f}: ${issues.join('; ')}`);
-    console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${f.padEnd(28)} ${ok ? `OK  (NMLS ${expected}, ${isVV ? 'Nevada' : 'Kansas'})` : issues.join('; ')}`);
+    console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${f.padEnd(28)} ${ok ? `OK  (NMLS ${expected}, ${isVV ? 'Nevada' : 'Kansas'} law)` : issues.join('; ')}`);
   }
 
   console.log();
