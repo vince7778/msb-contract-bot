@@ -12,6 +12,9 @@ const { editDocument, isWordDocument } = require('./documentEditor');
 const { sendForSignature } = require('./signwellIntegration');
 const { convertDocxToPdf } = require('./pdfConverter');
 const { isContractQuestion, answerContractQuestion } = require('./contractQuery');
+const { logContractSent, startStatusSync } = require('./notionLogger');
+const { parseRequest, shouldTidy, buildSummaryCard, transcriptFileName } = require('./transcriptIntake');
+const { ContractDocParser } = require('./contractDocParser');
 const axios = require('axios');
 const https = require('https');
 const http = require('http');
@@ -76,6 +79,134 @@ function buildApprovalBlocks(pendingId, p) {
   elements.push({ type: 'button', style: 'danger', text: { type: 'plain_text', text: ':wastebasket: Discard', emoji: true }, action_id: 'discard_contract', value: pendingId });
   blocks.push({ type: 'actions', block_id: 'contract_review', elements });
   return blocks;
+}
+
+// ---------------------------------------------------------------------------
+// Transcript intake
+// ---------------------------------------------------------------------------
+// Sales pastes the whole call into the channel along with the contract
+// details, which buries everything else (Christine, 2026-09-19). We keep the
+// transcript - the one-pager depends on it - but move it out of the message
+// body and into an attached file, leaving a tidy card behind.
+// ---------------------------------------------------------------------------
+
+const TEXTY_EXT = /\.(txt|text|md|log|csv|vtt|srt|rtf|json)$/i;
+const DOCY_EXT = /\.(docx|pdf)$/i;
+
+/**
+ * Pull transcript text out of any files attached to the message.
+ * Slack snippets arrive as plain-text files, so this also covers someone
+ * pressing Cmd/Ctrl+Shift+Enter to turn a long paste into a snippet.
+ * Returns '' when there's nothing usable - never throws.
+ */
+async function transcriptFromFiles(files, botToken) {
+  if (!files || !files.length) return '';
+
+  const parts = [];
+  for (const f of files) {
+    const name = f.name || '';
+    const isSnippet = (f.mimetype === 'text/plain') || (f.filetype === 'text');
+    const texty = TEXTY_EXT.test(name) || isSnippet;
+    const docy = DOCY_EXT.test(name);
+    if (!texty && !docy) continue;
+
+    try {
+      const url = f.url_private_download || f.url_private;
+      if (!url) continue;
+      const buf = await downloadSlackFile(url, botToken);
+      if (!buf || !buf.length) continue;
+
+      let content = '';
+      if (texty) {
+        content = buf.toString('utf8');
+      } else {
+        const parser = new ContractDocParser();
+        const ext = (name.split('.').pop() || '').toLowerCase();
+        content = await parser.extractText(buf, ext);
+      }
+      if (content && content.trim()) {
+        parts.push(content.trim());
+        console.log(`[Intake] Read transcript from attachment "${name}" (${content.length} chars)`);
+      }
+    } catch (e) {
+      console.error(`[Intake] Couldn't read attachment "${name}":`, e.message);
+    }
+  }
+  return parts.join('\n\n');
+}
+
+/**
+ * Replace a wall-of-text contract request with a tidy card plus an attached
+ * transcript file. Returns true when the channel was tidied.
+ *
+ * Deliberately defensive: if anything fails we leave the original message
+ * alone and let normal contract generation carry on. A tidying failure must
+ * never cost anyone a contract.
+ */
+async function tidyContractRequest({ event, client, parsed }) {
+  let transcriptUrl = null;
+  let uploaded = false;
+
+  // 1. Upload the transcript as a file, so it collapses to a clickable card.
+  try {
+    const fileName = transcriptFileName(parsed.fields);
+    const clientName = parsed.fields.client || 'this call';
+    const res = await client.files.uploadV2({
+      channel_id: event.channel,
+      thread_ts: event.thread_ts || event.ts,
+      filename: fileName,
+      title: `Call transcript - ${clientName}`,
+      file: Buffer.from(parsed.transcript, 'utf8')
+    });
+    uploaded = true;
+
+    // uploadV2's response shape varies by SDK version; dig for a permalink.
+    const f = res && (
+      (res.files && res.files[0] && (res.files[0].files ? res.files[0].files[0] : res.files[0])) ||
+      res.file
+    );
+    if (f && (f.permalink || f.url_private)) transcriptUrl = f.permalink || f.url_private;
+  } catch (e) {
+    console.error('[Intake] Transcript upload failed:', e.message);
+  }
+
+  // 2. Post the tidy summary card.
+  try {
+    const card = buildSummaryCard({
+      parsed,
+      requesterId: event.user,
+      transcriptUrl
+    });
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts || event.ts,
+      text: card.text,
+      blocks: card.blocks
+    });
+  } catch (e) {
+    console.error('[Intake] Summary card failed:', e.message);
+    return false;
+  }
+
+  // 3. Optionally remove the original wall of text.
+  //    Slack bot tokens can only delete their own messages, so this needs a
+  //    workspace-admin USER token. Entirely opt-in: without the env var the
+  //    original message simply stays put.
+  const adminToken = process.env.SLACK_ADMIN_USER_TOKEN;
+  if (adminToken && uploaded) {
+    try {
+      await client.chat.delete({
+        token: adminToken,
+        channel: event.channel,
+        ts: event.ts
+      });
+      console.log(`[Intake] Tidied request for "${parsed.fields.client || 'client'}" (original removed).`);
+    } catch (e) {
+      console.error('[Intake] Could not remove original message:', e.data && e.data.error || e.message);
+    }
+  }
+
+  return true;
 }
 
 function chicagoTime() {
@@ -396,6 +527,14 @@ async function generateDocuments(clientData, event, client, say) {
       accountValueDisplay: clientData.accountValue || null,
       bigDeal,
       contractType,
+      // Raw values for the Notion Contract Tracker row (the *Display fields
+      // above are formatted for the Slack card and aren't machine-readable).
+      rate,
+      legalRate: clientData.legalRate || null,
+      hasLegalRate: !!clientData.hasLegalRate,
+      accountValueUSD: typeof clientData.accountValueUSD === 'number' ? clientData.accountValueUSD : null,
+      accountType: clientData.accountType || accountTypeDisplay,
+      address: clientData.address || null,
       emailPreview,
       clientKey,
       createdAt: Date.now()
@@ -449,9 +588,34 @@ function registerHandlers(app) {
 // Listen for mentions
 app.event('app_mention', async ({ event, client, say }) => {
   try {
-    const text = event.text;
+    let text = event.text;
     const threadTs = event.thread_ts || event.ts;
     const isInThread = !!event.thread_ts;
+
+    // A transcript attached as a file (or a Slack snippet) counts the same as
+    // one pasted inline - fold it into the text before anything else looks at
+    // it, so the contract and one-pager still get the full call.
+    // A .docx attachment means the existing "edit this document" flow below,
+    // not a transcript - leave those files alone entirely.
+    const editingADoc = (event.files || []).some(f => isWordDocument(f.name || ''));
+    if (!editingADoc && event.files && event.files.length > 0) {
+      const attached = await transcriptFromFiles(event.files, process.env.SLACK_BOT_TOKEN);
+      if (attached) {
+        console.log(`[Intake] Folding ${attached.length} chars of attached transcript into the request.`);
+        text = `${text}\n\nInput:\n${attached}`;
+      }
+    }
+
+    // Move a long pasted call out of the channel and into a clickable file.
+    // Generation below still runs on the full `text`, transcript included.
+    if (shouldTidy(text)) {
+      try {
+        const parsed = parseRequest(text);
+        await tidyContractRequest({ event, client, parsed });
+      } catch (tidyErr) {
+        console.error('[Intake] Tidy failed (continuing normally):', tidyErr.message);
+      }
+    }
 
     console.log(`[Bot] Received mention. In thread: ${isInThread}, Thread: ${threadTs}`);
 
@@ -736,6 +900,40 @@ app.action('approve_send', async ({ ack, body, client, action }) => {
         }] }
       ]
     });
+
+    // ---------------------------------------------------------------------
+    // Log the deal to the Notion Contract Tracker. Deliberately last and
+    // fully non-throwing: the contract is already with the client, so a
+    // Notion hiccup must never surface as a failure here. A background
+    // poller flips this row to Active once SignWell reports it signed.
+    // ---------------------------------------------------------------------
+    try {
+      const logged = await logContractSent({
+        clientName: pending.clientName,
+        companyShort: pending.companyShort,
+        signerName: pending.recipientName,
+        signerEmail: pending.recipientEmail,
+        accountType: pending.accountType,
+        rate: pending.rate,
+        legalRate: pending.legalRate,
+        hasLegalRate: pending.hasLegalRate,
+        accountValueUSD: pending.accountValueUSD,
+        address: pending.address,
+        contractType: pending.contractType,
+        fileName: pending.fileName,
+        signwellId: signResult.id,
+        signingUrl: signingUrl,
+        approvedBy: clickedBy
+      });
+      if (!logged.ok && logged.reason !== 'disabled') {
+        await client.chat.postMessage({
+          channel, thread_ts: messageTs,
+          text: ':information_source: Contract sent fine, but I couldn\u2019t add it to the Notion Contract Tracker. Worth adding by hand.'
+        });
+      }
+    } catch (notionErr) {
+      console.error('[Approve] Notion logging error (ignored):', notionErr.message);
+    }
   } catch (signError) {
     const apiDetail = signError.response && signError.response.data
       ? ` (${JSON.stringify(signError.response.data).slice(0, 200)})`
@@ -870,6 +1068,7 @@ async function startBot() {
     console.log('💬 Thread memory: ENABLED');
     console.log('🏢 Companies: Midwest Service Bureau, Vegas Valley Collection Service');
     console.log('📋 Templates: 4 standard contracts (MSB/VV × Medical/NonMedical)');
+    startStatusSync();
     console.log('Listening for mentions in Slack...');
   } catch (err) {
     console.error('[StartBot] Failed to start app:', err.message);
