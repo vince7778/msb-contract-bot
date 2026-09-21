@@ -35,7 +35,7 @@ function main() {
   }
 
   const problems = [];
-  console.log('Checking NMLS ID, governing law and address in each template\n');
+  console.log('Checking NMLS ID, governing law, address and key clauses in each template\n');
 
   for (const f of files) {
     const isVV = /^VV[_-]/i.test(f);
@@ -76,9 +76,16 @@ function main() {
       if (!/State of Kansas/.test(flat)) issues.push('governing law is not Kansas');
     }
 
+    // 4.4 Net Client Designation must carry its definition, not just the
+    // heading and the acknowledgement. Added at Avery's request - prospects
+    // kept asking what "Net Client" actually meant.
+    if (!/means that Collector\u2019s commission is deducted directly from collections/.test(flat)) {
+      issues.push('4.4 Net Client definition missing');
+    }
+
     const ok = issues.length === 0;
     if (!ok) problems.push(`${f}: ${issues.join('; ')}`);
-    console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${f.padEnd(28)} ${ok ? `OK  (NMLS ${expected}, ${isVV ? 'Nevada' : 'Kansas'} law)` : issues.join('; ')}`);
+    console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${f.padEnd(28)} ${ok ? `OK  (NMLS ${expected}, ${isVV ? 'Nevada' : 'Kansas'} law, 4.4 defined)` : issues.join('; ')}`);
   }
 
   console.log();
@@ -89,7 +96,7 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`All ${files.length} templates carry the correct NMLS ID, governing law and address.`);
+  console.log(`All ${files.length} templates carry the correct NMLS ID, governing law, address and clauses.`);
 }
 
 main();
