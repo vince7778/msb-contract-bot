@@ -35,7 +35,7 @@ function main() {
   }
 
   const problems = [];
-  console.log('Checking NMLS IDs in each contract template\n');
+  console.log('Checking NMLS ID, governing law and address in each template\n');
 
   for (const f of files) {
     const isVV = /^VV[_-]/i.test(f);
@@ -46,18 +46,30 @@ function main() {
     const hasExpected = text.includes(expected);
     const hasForbidden = text.includes(forbidden);
 
-    let status;
+    const issues = [];
     if (hasForbidden) {
-      status = `WRONG - carries ${isVV ? 'MSB' : 'Vegas Valley'}'s NMLS (${forbidden})`;
-      problems.push(`${f}: contains ${forbidden}, expected ${expected}`);
+      issues.push(`carries ${isVV ? 'MSB' : 'Vegas Valley'}'s NMLS (${forbidden})`);
     } else if (!hasExpected) {
-      status = `no NMLS ID found (expected ${expected})`;
-      problems.push(`${f}: missing ${expected}`);
-    } else {
-      status = `OK  (${expected})`;
+      issues.push(`no NMLS ID found (expected ${expected})`);
     }
 
-    console.log(`  ${hasForbidden || !hasExpected ? 'FAIL' : 'PASS'}  ${f.padEnd(28)} ${status}`);
+    // Governing law and the Collector address must match the licensed state:
+    // Vegas Valley is Nevada-only (NRS 649); MSB is Kansas.
+    const flat = text.replace(/\s+/g, ' ');
+    if (isVV) {
+      if (/\bKansas\b/.test(flat)) issues.push('mentions Kansas');
+      if (/Wichita|67213/.test(flat)) issues.push('carries the Wichita address');
+      if (!/State of Nevada/.test(flat)) issues.push('governing law is not Nevada');
+      if (!/Jones Blvd/.test(flat)) issues.push('missing the Las Vegas address');
+    } else {
+      if (/\bNevada\b/.test(flat)) issues.push('mentions Nevada');
+      if (/Jones Blvd/.test(flat)) issues.push('carries the Las Vegas address');
+      if (!/State of Kansas/.test(flat)) issues.push('governing law is not Kansas');
+    }
+
+    const ok = issues.length === 0;
+    if (!ok) problems.push(`${f}: ${issues.join('; ')}`);
+    console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${f.padEnd(28)} ${ok ? `OK  (NMLS ${expected}, ${isVV ? 'Nevada' : 'Kansas'})` : issues.join('; ')}`);
   }
 
   console.log();
@@ -68,7 +80,7 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`All ${files.length} templates carry the correct NMLS ID.`);
+  console.log(`All ${files.length} templates carry the correct NMLS ID, governing law and address.`);
 }
 
 main();
