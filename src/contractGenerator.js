@@ -24,8 +24,34 @@ const TEMPLATES_DIR = path.join(__dirname, '..', 'templates');
  * Get the correct template based on company and medical status
  * Legal rate is handled dynamically (no separate legal templates needed)
  */
+/**
+ * Resolve whatever was handed to us into a real company config.
+ *
+ * This used to be a bare `company.id === 'vegasvalley'`, which silently
+ * evaluated to false - and therefore "MSB" - whenever `company` arrived as a
+ * string ('VV'), as undefined, or as anything other than the config object.
+ * A silent fall-through to MSB is exactly how a Vegas Valley contract can end
+ * up carrying MSB's NMLS ID, so resolve strings properly and say so loudly
+ * when we genuinely can't tell.
+ */
+function resolveIsVegas(company) {
+  if (company && typeof company === 'object' && company.id) {
+    return company.id === 'vegasvalley';
+  }
+  if (typeof company === 'string') {
+    const c = company.trim().toLowerCase();
+    if (/^(vv|vvcs|vegas|vegasvalley|vegas valley|vegas v)/.test(c)) return true;
+    if (/^(msb|midwest)/.test(c)) return false;
+  }
+  console.warn(
+    `[Template] Could not identify the company from ${JSON.stringify(company)} - ` +
+    `defaulting to MSB. Check the caller: a wrong company here means a wrong NMLS ID on the contract.`
+  );
+  return false;
+}
+
 function getTemplatePath(company, isMedical, isCommercial) {
-  const isVegas = company.id === 'vegasvalley';
+  const isVegas = resolveIsVegas(company);
 
   // Commercial / B2B takes precedence: Avery's dedicated commercial
   // template (corrected clauses, 90-day placement verification, both
