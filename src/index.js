@@ -14,7 +14,6 @@ const { convertDocxToPdf } = require('./pdfConverter');
 const { isContractQuestion, answerContractQuestion } = require('./contractQuery');
 const { logContractSent, startStatusSync } = require('./notionLogger');
 const { parseRequest, shouldTidy, buildSummaryCard, transcriptFileName } = require('./transcriptIntake');
-const { ContractDocParser } = require('./contractDocParser');
 const axios = require('axios');
 const https = require('https');
 const http = require('http');
@@ -120,9 +119,19 @@ async function transcriptFromFiles(files, botToken) {
       if (texty) {
         content = buf.toString('utf8');
       } else {
-        const parser = new ContractDocParser();
-        const ext = (name.split('.').pop() || '').toLowerCase();
-        content = await parser.extractText(buf, ext);
+        // Loaded lazily and defensively: contractDocParser pulls in mammoth /
+        // pdf-parse, and a missing optional dependency must never stop the bot
+        // from booting or from handling a plain-text transcript.
+        try {
+          const { ContractDocParser } = require('./contractDocParser');
+          const parser = new ContractDocParser();
+          const ext = (name.split('.').pop() || '').toLowerCase();
+          content = await parser.extractText(buf, ext);
+        } catch (parseErr) {
+          console.error(`[Intake] Can't parse "${name}" (${parseErr.message}). ` +
+            'Paste the transcript inline or attach it as a .txt instead.');
+          continue;
+        }
       }
       if (content && content.trim()) {
         parts.push(content.trim());
